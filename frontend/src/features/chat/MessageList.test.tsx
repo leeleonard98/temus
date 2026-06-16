@@ -53,4 +53,47 @@ describe("MessageList", () => {
     )
     expect(screen.getByLabelText(/assistant is typing/i)).toBeInTheDocument()
   })
+
+  it("renders a 'Show reasoning' disclosure when an assistant trace is attached", () => {
+    render(
+      <MessageList
+        role="client"
+        isStreaming={false}
+        messages={[
+          {
+            id: "u",
+            session_id: "s",
+            role: "user",
+            content: "explain diversification",
+            created_at: "t",
+          },
+          {
+            id: "a",
+            session_id: "s",
+            role: "assistant",
+            content: "Diversification spreads risk.",
+            created_at: "t",
+            trace: {
+              researcher: {
+                status: "complete",
+                topics: ["diversification", "risk"],
+                rationale: "Identified relevant topics.",
+              },
+              analyst: {
+                status: "complete",
+                findings: [{ claim: "spread across asset classes", confidence: "high" }],
+                summary: "Synthesized.",
+              },
+              writer: { status: "complete" },
+            },
+          },
+        ]}
+      />,
+    )
+    expect(screen.getByText(/show reasoning/i)).toBeInTheDocument()
+    expect(screen.getByTestId("agent-stepper")).toBeInTheDocument()
+    expect(screen.getByText("diversification")).toBeInTheDocument()
+    expect(screen.getByText(/spread across asset classes/i)).toBeInTheDocument()
+    expect(screen.getByText(/wrote final answer/i)).toBeInTheDocument()
+  })
 })

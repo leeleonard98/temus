@@ -93,6 +93,41 @@ describe("useChat", () => {
     expect(result.current.error).toBeUndefined()
   })
 
+  it("attaches an agent trace to the assistant message from the SSE pipeline", async () => {
+    const fetchMock = primeBootstrap("client")
+    fetchMock.mockResolvedValueOnce(
+      sseResponse([
+        'data: {"type":"agent_start","agent":"researcher"}\n\n',
+        'data: {"type":"agent_complete","agent":"researcher","output":{"topics":["diversification","risk"],"rationale":"stub"}}\n\n',
+        'data: {"type":"agent_start","agent":"analyst"}\n\n',
+        'data: {"type":"agent_complete","agent":"analyst","output":{"findings":[{"claim":"spread risk","confidence":"high"}],"summary":"ok"}}\n\n',
+        'data: {"type":"agent_start","agent":"writer"}\n\n',
+        'data: {"type":"delta","content":"Hello"}\n\n',
+        'data: {"type":"agent_complete","agent":"writer","output":{}}\n\n',
+        'data: {"type":"done","message_id":"m-traced"}\n\n',
+      ]),
+    )
+
+    const { result } = renderHook(() => useChat())
+    await waitFor(() => expect(result.current.session?.id).toBe("s-client"))
+
+    await act(async () => {
+      await result.current.send("explain diversification")
+    })
+
+    const assistant = result.current.messages.find((m) => m.role === "assistant")
+    expect(assistant?.id).toBe("m-traced")
+    expect(assistant?.content).toBe("Hello")
+    expect(assistant?.trace).toBeDefined()
+    expect(assistant?.trace?.researcher.status).toBe("complete")
+    expect(assistant?.trace?.researcher.topics).toEqual(["diversification", "risk"])
+    expect(assistant?.trace?.analyst.status).toBe("complete")
+    expect(assistant?.trace?.analyst.findings).toEqual([
+      { claim: "spread risk", confidence: "high" },
+    ])
+    expect(assistant?.trace?.writer.status).toBe("complete")
+  })
+
   it("setRole switches identity and reloads session", async () => {
     primeBootstrap("client")
     const { result } = renderHook(() => useChat())

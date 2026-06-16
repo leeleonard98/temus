@@ -27,7 +27,7 @@ from app.schemas.chat import (
     UserCreate,
     UserOut,
 )
-from app.services import llm
+from app.services.agents import run_sequential
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["chat"])
@@ -136,7 +136,12 @@ def _sse(data: dict) -> str:
 async def chat_stream(
     payload: ChatRequest, session: AsyncSession = Depends(get_session)
 ) -> StreamingResponse:
-    """Stream assistant tokens as SSE; persist both turns when the stream ends."""
+    """Stream the sequential 3-agent pipeline (Researcher -> Analyst -> Writer).
+
+    The Writer's tokens are the user-facing assistant reply (and what gets
+    persisted as a single `chat_messages` row). Researcher and Analyst stages
+    emit trace events the UI renders as a "Show reasoning" disclosure.
+    """
     cs = await session.get(ChatSession, payload.session_id)
     if cs is None:
         raise HTTPException(status_code=404, detail="session not found")
@@ -146,7 +151,7 @@ async def chat_stream(
         raise HTTPException(status_code=404, detail="user not found")
 
     # Persist the user turn FIRST so it (a) survives a client disconnect and
-    # (b) is included verbatim when we reload history for the LLM call below.
+    # (b) is included verbatim when we reload history for the agents below.
     user_msg = ChatMessage(
         session_id=payload.session_id,
         role=MessageRole.user,
@@ -157,44 +162,64 @@ async def chat_stream(
     await session.commit()
     await session.refresh(user_msg)
 
-    # AC2: replay the full ordered conversation (oldest → newest) so the model
-    # has multi-turn context. The just-persisted user message is the last row.
-    # Phase 1 = full replay, no truncation/windowing (summarization lands in A12).
-    history_rows = (
+    # AC2: replay the full ordered conversation (oldest -> newest, EXCLUDING
+    # the just-persisted user turn — agents add it themselves) so multi-turn
+    # context is preserved end-to-end.
+    prior_rows = (
         await session.scalars(
             select(ChatMessage)
-            .where(ChatMessage.session_id == payload.session_id)
+            .where(
+                ChatMessage.session_id == payload.session_id,
+                ChatMessage.id != user_msg.id,
+            )
             .order_by(ChatMessage.created_at.asc())
         )
     ).all()
+    history: list[dict] = [
+        {"role": row.role.value, "content": row.content} for row in prior_rows
+    ]
 
-    # AC4: when the user sent a UI snapshot, append it to the system prompt so
-    # the model can ground specific numbers in what's actually rendered.
-    sysprompt = _system_prompt_for(user.role)
-    if payload.ui_context:
-        sysprompt = (
-            f"{sysprompt}\n\n## Current UI State\n"
-            f"```json\n{json.dumps(payload.ui_context, default=str)}\n```\n"
-            "Only ground claims about specific numbers in the JSON above. "
-            "Do not invent values."
-        )
-
-    messages: list[dict] = [{"role": "system", "content": sysprompt}]
-    for row in history_rows:
-        messages.append({"role": row.role.value, "content": row.content})
+    role_str = "advisor" if user.role == UserRole.advisor else "client"
 
     async def event_stream() -> AsyncIterator[str]:
-        chunks: list[str] = []
+        writer_chunks: list[str] = []
         try:
-            async for delta in llm.stream_chat(messages):
-                chunks.append(delta)
-                yield _sse({"delta": delta})
+            async for ev in run_sequential(
+                payload.content,
+                history=history,
+                role=role_str,
+                ui_context=payload.ui_context,
+            ):
+                if ev.kind == "start":
+                    yield _sse({"type": "agent_start", "agent": ev.agent})
+                elif ev.kind == "delta":
+                    if ev.agent == "writer":
+                        # User-facing answer tokens.
+                        writer_chunks.append(ev.content or "")
+                        yield _sse({"type": "delta", "content": ev.content or ""})
+                    else:
+                        # Internal-stage tokens — for trace UI only.
+                        yield _sse(
+                            {
+                                "type": "agent_delta",
+                                "agent": ev.agent,
+                                "content": ev.content or "",
+                            }
+                        )
+                elif ev.kind == "complete":
+                    yield _sse(
+                        {
+                            "type": "agent_complete",
+                            "agent": ev.agent,
+                            "output": ev.output or {},
+                        }
+                    )
         except Exception as exc:  # pragma: no cover — defensive
-            logger.exception("LLM stream failed")
-            yield _sse({"error": str(exc)})
+            logger.exception("agent pipeline failed")
+            yield _sse({"type": "error", "error": str(exc)})
             return
 
-        full = "".join(chunks)
+        full = "".join(writer_chunks)
         assistant_msg = ChatMessage(
             session_id=payload.session_id,
             role=MessageRole.assistant,
@@ -203,7 +228,7 @@ async def chat_stream(
         session.add(assistant_msg)
         await session.commit()
         await session.refresh(assistant_msg)
-        yield _sse({"done": True, "message_id": str(assistant_msg.id)})
+        yield _sse({"type": "done", "message_id": str(assistant_msg.id)})
 
     return StreamingResponse(
         event_stream(),

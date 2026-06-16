@@ -31,6 +31,15 @@ export type Message = {
   created_at: string
 }
 
+/** Agent stage names emitted by the sequential pipeline. */
+export type AgentName = "researcher" | "analyst" | "writer"
+
+/** Trace events emitted alongside the final-answer deltas. */
+export type AgentEvent =
+  | { type: "agent_start"; agent: AgentName }
+  | { type: "agent_delta"; agent: AgentName; content: string }
+  | { type: "agent_complete"; agent: AgentName; output: Record<string, unknown> }
+
 const API_BASE: string =
   (import.meta.env?.VITE_API_BASE_URL as string | undefined) ?? "/api/v1"
 
@@ -82,10 +91,18 @@ export function listMessages(sessionId: string): Promise<Message[]> {
 }
 
 /**
- * Stream a chat completion. Calls `onDelta` for each token, `onDone` once
- * the server signals completion (with the persisted assistant message id).
+ * Stream a chat completion.
  *
- * Parses raw SSE frames: `data: <json>\n\n`. We do not depend on an SSE
+ * The backend runs a sequential 3-agent pipeline (Researcher -> Analyst ->
+ * Writer). The Writer's tokens are the user-facing answer and arrive as
+ * `{type:"delta", content:"..."}` frames. Researcher / Analyst emit
+ * `agent_start` / `agent_delta` / `agent_complete` frames the UI renders as
+ * a "Show reasoning" disclosure (consumed via `onAgentEvent`).
+ *
+ * For backwards compatibility we also accept the legacy `{delta:"..."}`
+ * shape (no `type` field) and route those to `onDelta`.
+ *
+ * Parses raw SSE frames: `data: <json>\n\n`. We don't depend on an SSE
  * library because POST + EventSource is a pain; raw fetch streaming is fine.
  */
 export async function streamChat(
@@ -94,11 +111,17 @@ export async function streamChat(
   onDelta: (token: string) => void,
   onDone: (messageId: string) => void,
   signal?: AbortSignal,
+  uiContext?: object,
+  onAgentEvent?: (event: AgentEvent) => void,
 ): Promise<void> {
   const res = await fetch(`${API_BASE}/chat`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
-    body: JSON.stringify({ session_id: sessionId, content }),
+    body: JSON.stringify({
+      session_id: sessionId,
+      content,
+      ...(uiContext ? { ui_context: uiContext } : {}),
+    }),
     signal,
   })
 
@@ -127,19 +150,24 @@ export async function streamChat(
     while (sepIdx !== -1) {
       const frame = buffer.slice(0, sepIdx)
       buffer = buffer.slice(sepIdx + 2)
-      handleFrame(frame, onDelta, onDone)
+      handleFrame(frame, onDelta, onDone, onAgentEvent)
       sepIdx = buffer.indexOf("\n\n")
     }
   }
   // Flush any trailing frame without terminator.
   const tail = buffer.trim()
-  if (tail) handleFrame(tail, onDelta, onDone)
+  if (tail) handleFrame(tail, onDelta, onDone, onAgentEvent)
+}
+
+function isAgent(value: unknown): value is AgentName {
+  return value === "researcher" || value === "analyst" || value === "writer"
 }
 
 function handleFrame(
   frame: string,
   onDelta: (token: string) => void,
   onDone: (messageId: string) => void,
+  onAgentEvent?: (event: AgentEvent) => void,
 ): void {
   // A frame may have multiple lines; we only care about `data:` lines.
   const lines = frame.split("\n")
@@ -156,11 +184,56 @@ function handleFrame(
     }
     if (typeof parsed !== "object" || parsed === null) continue
     const obj = parsed as Record<string, unknown>
-    if (typeof obj.delta === "string") {
-      onDelta(obj.delta)
+
+    const type = typeof obj.type === "string" ? obj.type : undefined
+
+    // New typed schema:
+    //   {"type":"delta","content":"..."}            <- user-facing token
+    //   {"type":"done","message_id":"..."}          <- final marker
+    //   {"type":"error","error":"..."}              <- streaming error
+    //   {"type":"agent_start","agent":"..."}        <- trace start
+    //   {"type":"agent_delta","agent":"...","content":"..."} <- internal token
+    //   {"type":"agent_complete","agent":"...","output":{...}} <- trace done
+    if (type === "delta" && typeof obj.content === "string") {
+      onDelta(obj.content)
+      continue
     }
-    if (obj.done === true && typeof obj.message_id === "string") {
+    if (type === "done" && typeof obj.message_id === "string") {
       onDone(obj.message_id)
+      continue
+    }
+    if (type === "error" && typeof obj.error === "string") {
+      throw new Error(obj.error)
+    }
+    if (type === "agent_start" && isAgent(obj.agent)) {
+      onAgentEvent?.({ type: "agent_start", agent: obj.agent })
+      continue
+    }
+    if (
+      type === "agent_delta" &&
+      isAgent(obj.agent) &&
+      typeof obj.content === "string"
+    ) {
+      onAgentEvent?.({ type: "agent_delta", agent: obj.agent, content: obj.content })
+      continue
+    }
+    if (type === "agent_complete" && isAgent(obj.agent)) {
+      const output =
+        typeof obj.output === "object" && obj.output !== null
+          ? (obj.output as Record<string, unknown>)
+          : {}
+      onAgentEvent?.({ type: "agent_complete", agent: obj.agent, output })
+      continue
+    }
+
+    // Backwards-compat: legacy shape with no `type` field — treat as delta/done.
+    if (type === undefined) {
+      if (typeof obj.delta === "string") {
+        onDelta(obj.delta)
+      }
+      if (obj.done === true && typeof obj.message_id === "string") {
+        onDone(obj.message_id)
+      }
     }
   }
 }

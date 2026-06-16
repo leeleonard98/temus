@@ -69,7 +69,12 @@ async def test_session_create_and_list_newest_first(client: AsyncClient) -> None
 
 async def test_chat_stream_persists_messages_and_history(client: AsyncClient) -> None:
     """AC2: multi-turn state — posting a message persists user + assistant
-    rows; history endpoint returns them in chronological order."""
+    rows; history endpoint returns them in chronological order.
+
+    Under the new sequential pipeline (Researcher -> Analyst -> Writer) the
+    user-facing answer tokens come as `{"type": "delta", "content": "..."}`;
+    `done` carries the persisted assistant message id.
+    """
     user = await _create_user(client, "dave@aura.test", "client")
     session = await _create_session(client, user["id"])
 
@@ -87,9 +92,10 @@ async def test_chat_stream_persists_messages_and_history(client: AsyncClient) ->
             if not line.startswith("data:"):
                 continue
             payload = json.loads(line[len("data:") :].strip())
-            if "delta" in payload:
-                deltas.append(payload["delta"])
-            elif payload.get("done"):
+            kind = payload.get("type")
+            if kind == "delta":
+                deltas.append(payload["content"])
+            elif kind == "done":
                 done_payload = payload
 
     assert done_payload is not None
@@ -162,7 +168,7 @@ async def test_chat_unknown_session_returns_404(client: AsyncClient) -> None:
 
 
 async def _drain_chat(client: AsyncClient, session_id: str, content: str) -> str:
-    """POST /chat, drain SSE, return concatenated assistant deltas."""
+    """POST /chat, drain SSE, return concatenated user-facing (Writer) deltas."""
     deltas: list[str] = []
     async with client.stream(
         "POST",
@@ -174,8 +180,8 @@ async def _drain_chat(client: AsyncClient, session_id: str, content: str) -> str
             if not line.startswith("data:"):
                 continue
             payload = json.loads(line[len("data:") :].strip())
-            if "delta" in payload:
-                deltas.append(payload["delta"])
+            if payload.get("type") == "delta":
+                deltas.append(payload["content"])
     return "".join(deltas)
 
 
@@ -213,3 +219,58 @@ async def test_chat_multi_turn_replays_full_history(client: AsyncClient) -> None
     assert hist[2]["content"] == "what's my name?"
     assert hist[1]["content"] == reply_1
     assert hist[3]["content"] == reply_2
+
+
+async def test_chat_emits_three_agent_stages(client: AsyncClient) -> None:
+    """C3: the SSE stream emits start/complete frames for Researcher, Analyst,
+    and Writer in that order, plus user-facing `delta` frames for the Writer.
+    The persisted assistant message equals the concatenated Writer deltas.
+    """
+    user = await _create_user(client, "trace@aura.test", "client")
+    sess = await _create_session(client, user["id"])
+
+    starts: list[str] = []
+    completes: list[dict] = []
+    writer_deltas: list[str] = []
+    done_id: str | None = None
+
+    async with client.stream(
+        "POST",
+        "/api/v1/chat",
+        json={"session_id": sess["id"], "content": "explain diversification"},
+    ) as resp:
+        assert resp.status_code == 200
+        async for line in resp.aiter_lines():
+            if not line.startswith("data:"):
+                continue
+            ev = json.loads(line[len("data:") :].strip())
+            kind = ev.get("type")
+            if kind == "agent_start":
+                starts.append(ev["agent"])
+            elif kind == "agent_complete":
+                completes.append(ev)
+            elif kind == "delta":
+                writer_deltas.append(ev["content"])
+            elif kind == "done":
+                done_id = ev["message_id"]
+
+    # Stages fire in order, exactly once each.
+    assert starts == ["researcher", "analyst", "writer"]
+    assert [c["agent"] for c in completes] == ["researcher", "analyst", "writer"]
+
+    # Researcher and Analyst carry structured outputs.
+    researcher_out = next(c for c in completes if c["agent"] == "researcher")["output"]
+    analyst_out = next(c for c in completes if c["agent"] == "analyst")["output"]
+    assert isinstance(researcher_out.get("topics"), list) and researcher_out["topics"]
+    assert isinstance(analyst_out.get("findings"), list) and analyst_out["findings"]
+
+    # Writer's deltas form the user-facing answer; matches persisted row.
+    assert done_id is not None
+    assert writer_deltas, "writer must emit at least one delta"
+    full = "".join(writer_deltas)
+    assert "[stub]" in full  # offline writer fallback marker
+
+    hist = (await client.get(f"/api/v1/sessions/{sess['id']}/messages")).json()
+    assistant = next(m for m in hist if m["role"] == "assistant")
+    assert assistant["id"] == done_id
+    assert assistant["content"] == full

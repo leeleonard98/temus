@@ -77,9 +77,9 @@ describe("chat-api", () => {
   describe("streamChat", () => {
     it("parses SSE deltas and signals done with message_id", async () => {
       const body = streamFrom([
-        'data: {"delta": "Hel"}\n\n',
-        'data: {"delta": "lo"}\n\n',
-        'data: {"done": true, "message_id": "m1"}\n\n',
+        'data: {"type": "delta", "content": "Hel"}\n\n',
+        'data: {"type": "delta", "content": "lo"}\n\n',
+        'data: {"type": "done", "message_id": "m1"}\n\n',
       ])
       vi.mocked(fetch).mockResolvedValueOnce(new Response(body, { status: 200 }))
 
@@ -93,12 +93,26 @@ describe("chat-api", () => {
       expect(onDone).toHaveBeenCalledWith("m1")
     })
 
+    it("ignores agent_* trace frames (internal-stage tokens)", async () => {
+      const body = streamFrom([
+        'data: {"type": "agent_start", "agent": "researcher"}\n\n',
+        'data: {"type": "agent_delta", "agent": "researcher", "content": "JUNK"}\n\n',
+        'data: {"type": "delta", "content": "real"}\n\n',
+        'data: {"type": "done", "message_id": "m1"}\n\n',
+      ])
+      vi.mocked(fetch).mockResolvedValueOnce(new Response(body, { status: 200 }))
+
+      const deltas: string[] = []
+      await streamChat("s", "x", (t) => deltas.push(t), () => {})
+      expect(deltas.join("")).toBe("real")
+    })
+
     it("handles split frames across chunks", async () => {
       const body = streamFrom([
-        'data: {"del',
-        'ta": "ab"}\n',
-        '\ndata: {"delta": "cd"}\n\n',
-        'data: {"done": true, "message_id": "m2"}\n\n',
+        'data: {"type": "delta", "con',
+        'tent": "ab"}\n',
+        '\ndata: {"type": "delta", "content": "cd"}\n\n',
+        'data: {"type": "done", "message_id": "m2"}\n\n',
       ])
       vi.mocked(fetch).mockResolvedValueOnce(new Response(body, { status: 200 }))
 
@@ -112,6 +126,16 @@ describe("chat-api", () => {
         new Response(JSON.stringify({ detail: "nope" }), { status: 400 }),
       )
       await expect(streamChat("s", "x", () => {}, () => {})).rejects.toThrow(/nope/)
+    })
+
+    it("throws when the stream emits an error frame", async () => {
+      const body = streamFrom([
+        'data: {"type": "error", "error": "agent pipeline failed"}\n\n',
+      ])
+      vi.mocked(fetch).mockResolvedValueOnce(new Response(body, { status: 200 }))
+      await expect(
+        streamChat("s", "x", () => {}, () => {}),
+      ).rejects.toThrow(/agent pipeline failed/)
     })
   })
 })

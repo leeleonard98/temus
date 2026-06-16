@@ -20,7 +20,7 @@ def postgres_container() -> Iterator[PostgresContainer]:
 
     Applies all alembic migrations once at startup.
     """
-    with PostgresContainer("postgres:16-alpine") as pg:
+    with PostgresContainer("pgvector/pgvector:pg16") as pg:
         sync_url = pg.get_connection_url()
         # testcontainers returns postgresql+psycopg2:// or postgresql://
         async_url = sync_url.replace("postgresql+psycopg2://", "postgresql+asyncpg://")

@@ -6,6 +6,7 @@ import {
   listSessions,
   streamChat,
   upsertUser,
+  type AgentEvent,
   type Message,
   type Role,
   type Session,
@@ -55,8 +56,63 @@ function savePersisted(p: Persisted) {
   }
 }
 
+/** Per-stage status of the agent pipeline as the trace events arrive. */
+export type StageStatus = "idle" | "running" | "complete"
+
+export type AgentTrace = {
+  researcher: { status: StageStatus; topics: string[]; rationale: string }
+  analyst: {
+    status: StageStatus
+    findings: { claim: string; confidence: string }[]
+    summary: string
+  }
+  writer: { status: StageStatus }
+}
+
+export function emptyTrace(): AgentTrace {
+  return {
+    researcher: { status: "idle", topics: [], rationale: "" },
+    analyst: { status: "idle", findings: [], summary: "" },
+    writer: { status: "idle" },
+  }
+}
+
+function applyAgentEvent(prev: AgentTrace, ev: AgentEvent): AgentTrace {
+  if (ev.type === "agent_start") {
+    return { ...prev, [ev.agent]: { ...prev[ev.agent], status: "running" } }
+  }
+  if (ev.type === "agent_complete") {
+    if (ev.agent === "researcher") {
+      const topics = Array.isArray(ev.output.topics)
+        ? (ev.output.topics as unknown[]).map((t) => String(t))
+        : []
+      const rationale = typeof ev.output.rationale === "string" ? ev.output.rationale : ""
+      return { ...prev, researcher: { status: "complete", topics, rationale } }
+    }
+    if (ev.agent === "analyst") {
+      const rawFindings = Array.isArray(ev.output.findings) ? ev.output.findings : []
+      const findings = rawFindings
+        .map((f) => {
+          if (!f || typeof f !== "object") return null
+          const obj = f as Record<string, unknown>
+          const claim = typeof obj.claim === "string" ? obj.claim : ""
+          const confidence = typeof obj.confidence === "string" ? obj.confidence : "medium"
+          return claim ? { claim, confidence } : null
+        })
+        .filter((x): x is { claim: string; confidence: string } => x !== null)
+      const summary = typeof ev.output.summary === "string" ? ev.output.summary : ""
+      return { ...prev, analyst: { status: "complete", findings, summary } }
+    }
+    if (ev.agent === "writer") {
+      return { ...prev, writer: { status: "complete" } }
+    }
+  }
+  // agent_delta is currently ignored — the structured `complete` payload is enough.
+  return prev
+}
+
 /** Local-only chat draft messages (assistant placeholder gets a temp id). */
-type DraftMessage = Message & { pending?: boolean }
+type DraftMessage = Message & { pending?: boolean; trace?: AgentTrace }
 
 export type UseChat = {
   user: User | null
@@ -240,6 +296,11 @@ export function useChat(): UseChat {
       setMessages((prev) => [...prev, userMsg, placeholder])
       setIsStreaming(true)
 
+      // Trace state lives in a ref so the SSE callbacks can mutate it without
+      // re-rendering on every token; we flush it onto the assistant message
+      // (a) on each agent_complete and (b) on `done`.
+      let trace: AgentTrace = emptyTrace()
+
       try {
         await streamChat(
           session.id,
@@ -254,7 +315,22 @@ export function useChat(): UseChat {
           (messageId) => {
             setMessages((prev) =>
               prev.map((m) =>
-                m.id === placeholderId ? { ...m, id: messageId, pending: false } : m,
+                m.id === placeholderId
+                  ? { ...m, id: messageId, pending: false, trace }
+                  : m,
+              ),
+            )
+          },
+          undefined,
+          undefined,
+          (event) => {
+            trace = applyAgentEvent(trace, event)
+            // Mirror running/complete state into the placeholder live so the
+            // stepper updates while the Writer is still streaming.
+            const snapshot = trace
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id === placeholderId ? { ...m, trace: snapshot } : m,
               ),
             )
           },
