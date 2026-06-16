@@ -176,6 +176,203 @@ describe("useChat", () => {
     expect(fetchMock).toHaveBeenCalledTimes(3)
   })
 
+  it("exposes the list of sessions and the current session id after bootstrap", async () => {
+    const fetchMock = vi.mocked(fetch)
+    fetchMock
+      .mockResolvedValueOnce(
+        jsonResponse({
+          id: "u-client",
+          email: "client-demo@aura.test",
+          display_name: "Demo Client",
+          role: "client",
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse([
+          { id: "s-1", user_id: "u-client", title: "Old", created_at: "t0" },
+          { id: "s-2", user_id: "u-client", title: "Older", created_at: "t-1" },
+        ]),
+      )
+      .mockResolvedValueOnce(jsonResponse([])) // listMessages
+
+    const { result } = renderHook(() => useChat())
+    await waitFor(() => expect(result.current.session?.id).toBe("s-1"))
+
+    expect(result.current.sessions.map((s) => s.id)).toEqual(["s-1", "s-2"])
+    expect(result.current.currentSessionId).toBe("s-1")
+  })
+
+  it("newChat() creates a fresh session, switches to it, and clears messages", async () => {
+    const fetchMock = vi.mocked(fetch)
+    fetchMock
+      .mockResolvedValueOnce(
+        jsonResponse({
+          id: "u-client",
+          email: "client-demo@aura.test",
+          display_name: "Demo Client",
+          role: "client",
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse([
+          { id: "s-1", user_id: "u-client", title: "Old", created_at: "t0" },
+        ]),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse([
+          {
+            id: "m-old",
+            session_id: "s-1",
+            role: "assistant",
+            content: "history",
+            created_at: "t1",
+          },
+        ]),
+      )
+
+    const { result } = renderHook(() => useChat())
+    await waitFor(() => expect(result.current.session?.id).toBe("s-1"))
+    expect(result.current.messages).toHaveLength(1)
+
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        id: "s-new",
+        user_id: "u-client",
+        title: "New chat",
+        created_at: "t2",
+      }),
+    )
+
+    await act(async () => {
+      await result.current.newChat()
+    })
+
+    expect(result.current.currentSessionId).toBe("s-new")
+    expect(result.current.session?.id).toBe("s-new")
+    expect(result.current.messages).toEqual([])
+    expect(result.current.sessions[0]?.id).toBe("s-new")
+    expect(result.current.sessions.map((s) => s.id)).toContain("s-1")
+  })
+
+  it("selectSession() switches to an existing session and reloads its messages", async () => {
+    const fetchMock = vi.mocked(fetch)
+    fetchMock
+      .mockResolvedValueOnce(
+        jsonResponse({
+          id: "u-client",
+          email: "client-demo@aura.test",
+          display_name: "Demo Client",
+          role: "client",
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse([
+          { id: "s-1", user_id: "u-client", title: "Now", created_at: "t1" },
+          { id: "s-2", user_id: "u-client", title: "Earlier", created_at: "t0" },
+        ]),
+      )
+      .mockResolvedValueOnce(jsonResponse([])) // initial listMessages for s-1
+
+    const { result } = renderHook(() => useChat())
+    await waitFor(() => expect(result.current.currentSessionId).toBe("s-1"))
+
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse([
+        {
+          id: "m-2",
+          session_id: "s-2",
+          role: "assistant",
+          content: "old greeting",
+          created_at: "t0",
+        },
+      ]),
+    )
+
+    await act(async () => {
+      await result.current.selectSession("s-2")
+    })
+
+    expect(result.current.currentSessionId).toBe("s-2")
+    expect(result.current.session?.id).toBe("s-2")
+    expect(result.current.messages).toHaveLength(1)
+    expect(result.current.messages[0]?.content).toBe("old greeting")
+  })
+
+  it("restores the persisted sessionId for the current role on remount", async () => {
+    const fetchMock = vi.mocked(fetch)
+    fetchMock
+      .mockResolvedValueOnce(
+        jsonResponse({
+          id: "u-client",
+          email: "client-demo@aura.test",
+          display_name: "Demo Client",
+          role: "client",
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse([
+          { id: "s-newest", user_id: "u-client", title: "Now", created_at: "t2" },
+          { id: "s-pinned", user_id: "u-client", title: "Earlier", created_at: "t1" },
+        ]),
+      )
+      .mockResolvedValueOnce(jsonResponse([]))
+
+    const { result, unmount } = renderHook(() => useChat())
+    await waitFor(() => expect(result.current.currentSessionId).toBe("s-newest"))
+
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse([
+        {
+          id: "m-pinned",
+          session_id: "s-pinned",
+          role: "assistant",
+          content: "pinned chat",
+          created_at: "t1",
+        },
+      ]),
+    )
+
+    await act(async () => {
+      await result.current.selectSession("s-pinned")
+    })
+    expect(result.current.currentSessionId).toBe("s-pinned")
+
+    unmount()
+
+    // Remount: localStorage should drive us back to s-pinned, not s-newest.
+    fetchMock
+      .mockResolvedValueOnce(
+        jsonResponse({
+          id: "u-client",
+          email: "client-demo@aura.test",
+          display_name: "Demo Client",
+          role: "client",
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse([
+          { id: "s-newest", user_id: "u-client", title: "Now", created_at: "t2" },
+          { id: "s-pinned", user_id: "u-client", title: "Earlier", created_at: "t1" },
+        ]),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse([
+          {
+            id: "m-pinned",
+            session_id: "s-pinned",
+            role: "assistant",
+            content: "pinned chat",
+            created_at: "t1",
+          },
+        ]),
+      )
+
+    const { result: result2 } = renderHook(() => useChat())
+    await waitFor(() => expect(result2.current.currentSessionId).toBe("s-pinned"))
+    expect(result2.current.session?.id).toBe("s-pinned")
+    expect(result2.current.messages[0]?.content).toBe("pinned chat")
+  })
+
   it("isStreaming flips true during send and false after", async () => {
     const fetchMock = primeBootstrap("client")
 

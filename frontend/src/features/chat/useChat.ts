@@ -18,6 +18,8 @@ type Persisted = {
   role: Role
   /** Cache of role -> userId so role flips don't reissue upserts when avoidable. */
   userIds: Partial<Record<Role, string>>
+  /** Last-selected session per role, so a refresh restores context. */
+  sessionIds: Partial<Record<Role, string>>
 }
 
 const SEED_IDENTITIES: Record<Role, { email: string; display_name: string }> = {
@@ -26,15 +28,21 @@ const SEED_IDENTITIES: Record<Role, { email: string; display_name: string }> = {
 }
 
 function loadPersisted(): Persisted {
-  if (typeof localStorage === "undefined") return { role: "client", userIds: {} }
+  if (typeof localStorage === "undefined") {
+    return { role: "client", userIds: {}, sessionIds: {} }
+  }
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
-    if (!raw) return { role: "client", userIds: {} }
+    if (!raw) return { role: "client", userIds: {}, sessionIds: {} }
     const parsed = JSON.parse(raw) as Partial<Persisted>
     const role: Role = parsed.role === "advisor" ? "advisor" : "client"
-    return { role, userIds: parsed.userIds ?? {} }
+    return {
+      role,
+      userIds: parsed.userIds ?? {},
+      sessionIds: parsed.sessionIds ?? {},
+    }
   } catch {
-    return { role: "client", userIds: {} }
+    return { role: "client", userIds: {}, sessionIds: {} }
   }
 }
 
@@ -55,8 +63,12 @@ export type UseChat = {
   role: Role
   setRole: (role: Role) => void
   session: Session | null
+  sessions: Session[]
+  currentSessionId: string | null
   messages: DraftMessage[]
   send: (content: string) => Promise<void>
+  newChat: () => Promise<void>
+  selectSession: (id: string) => Promise<void>
   isStreaming: boolean
   error: string | undefined
 }
@@ -65,6 +77,7 @@ export function useChat(): UseChat {
   const [persisted, setPersisted] = useState<Persisted>(() => loadPersisted())
   const [user, setUser] = useState<User | null>(null)
   const [session, setSession] = useState<Session | null>(null)
+  const [sessions, setSessions] = useState<Session[]>([])
   const [messages, setMessages] = useState<DraftMessage[]>([])
   const [isStreaming, setIsStreaming] = useState(false)
   const [error, setError] = useState<string | undefined>(undefined)
@@ -81,6 +94,7 @@ export function useChat(): UseChat {
       setError(undefined)
       setMessages([])
       setSession(null)
+      setSessions([])
       try {
         const role = persisted.role
         const seed = SEED_IDENTITIES[role]
@@ -89,7 +103,7 @@ export function useChat(): UseChat {
         setUser(u)
         setPersisted((prev) => {
           const next: Persisted = {
-            role: prev.role,
+            ...prev,
             userIds: { ...prev.userIds, [role]: u.id },
           }
           savePersisted(next)
@@ -98,9 +112,27 @@ export function useChat(): UseChat {
 
         const existing = await listSessions(u.id)
         if (cancelled || token !== bootstrapTokenRef.current) return
-        const s = existing[0] ?? (await createSession({ user_id: u.id, title: "New chat" }))
+
+        const persistedSessionId = persisted.sessionIds[role]
+        const restored = persistedSessionId
+          ? existing.find((s) => s.id === persistedSessionId)
+          : undefined
+        const s =
+          restored ?? existing[0] ?? (await createSession({ user_id: u.id, title: "New chat" }))
         if (cancelled || token !== bootstrapTokenRef.current) return
+
+        // Make sure the chosen session is reflected in the list.
+        const list = existing.some((e) => e.id === s.id) ? existing : [s, ...existing]
+        setSessions(list)
         setSession(s)
+        setPersisted((prev) => {
+          const next: Persisted = {
+            ...prev,
+            sessionIds: { ...prev.sessionIds, [role]: s.id },
+          }
+          savePersisted(next)
+          return next
+        })
 
         const history = await listMessages(s.id)
         if (cancelled || token !== bootstrapTokenRef.current) return
@@ -125,6 +157,54 @@ export function useChat(): UseChat {
       return next
     })
   }, [])
+
+  const persistSessionForCurrentRole = useCallback((sessionId: string) => {
+    setPersisted((prev) => {
+      const next: Persisted = {
+        ...prev,
+        sessionIds: { ...prev.sessionIds, [prev.role]: sessionId },
+      }
+      savePersisted(next)
+      return next
+    })
+  }, [])
+
+  const newChat = useCallback(async () => {
+    if (!user || isStreaming) return
+    setError(undefined)
+    try {
+      const s = await createSession({ user_id: user.id, title: "New chat" })
+      setSessions((prev) => [s, ...prev.filter((x) => x.id !== s.id)])
+      setSession(s)
+      setMessages([])
+      persistSessionForCurrentRole(s.id)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "failed to create chat")
+    }
+  }, [user, isStreaming, persistSessionForCurrentRole])
+
+  const selectSession = useCallback(
+    async (id: string) => {
+      if (isStreaming) return
+      // Tolerate selecting a session not yet in our list (rare race).
+      const target = sessions.find((s) => s.id === id)
+      if (!target) {
+        setError("session not found")
+        return
+      }
+      setError(undefined)
+      setSession(target)
+      setMessages([])
+      persistSessionForCurrentRole(target.id)
+      try {
+        const history = await listMessages(target.id)
+        setMessages(history)
+      } catch (e) {
+        setError(e instanceof Error ? e.message : "failed to load messages")
+      }
+    },
+    [sessions, isStreaming, persistSessionForCurrentRole],
+  )
 
   const send = useCallback(
     async (content: string) => {
@@ -191,8 +271,12 @@ export function useChat(): UseChat {
     role: persisted.role,
     setRole,
     session,
+    sessions,
+    currentSessionId: session?.id ?? null,
     messages,
     send,
+    newChat,
+    selectSession,
     isStreaming,
     error,
   }
