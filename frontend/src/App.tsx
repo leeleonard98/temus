@@ -1,5 +1,4 @@
 import { ChatPanel } from "@/features/chat/ChatPanel"
-import { HealthBadge } from "@/features/HealthBadge"
 
 export default function App() {
   return (
@@ -7,7 +6,6 @@ export default function App() {
       <header className="border-b">
         <div className="mx-auto flex max-w-6xl items-center justify-between px-6 py-3">
           <h1 className="text-xl font-semibold tracking-tight">AuraWealth</h1>
-          <HealthBadge />
         </div>
       </header>
       <main className="mx-auto max-w-6xl px-6 py-6">
