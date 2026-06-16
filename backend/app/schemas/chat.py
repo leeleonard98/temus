@@ -51,3 +51,7 @@ class MessageOut(BaseModel):
 class ChatRequest(BaseModel):
     session_id: uuid.UUID
     content: str = Field(min_length=1)
+    # AC4: arbitrary JSON describing what the client is currently looking at
+    # (portfolio totals, visible positions, etc.). Echoed into the system
+    # prompt and persisted on the user-message row for traceability.
+    ui_context: dict | None = None

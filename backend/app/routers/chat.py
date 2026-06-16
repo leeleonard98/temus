@@ -151,6 +151,7 @@ async def chat_stream(
         session_id=payload.session_id,
         role=MessageRole.user,
         content=payload.content,
+        ui_context=payload.ui_context,
     )
     session.add(user_msg)
     await session.commit()
@@ -167,7 +168,18 @@ async def chat_stream(
         )
     ).all()
 
-    messages: list[dict] = [{"role": "system", "content": _system_prompt_for(user.role)}]
+    # AC4: when the user sent a UI snapshot, append it to the system prompt so
+    # the model can ground specific numbers in what's actually rendered.
+    sysprompt = _system_prompt_for(user.role)
+    if payload.ui_context:
+        sysprompt = (
+            f"{sysprompt}\n\n## Current UI State\n"
+            f"```json\n{json.dumps(payload.ui_context, default=str)}\n```\n"
+            "Only ground claims about specific numbers in the JSON above. "
+            "Do not invent values."
+        )
+
+    messages: list[dict] = [{"role": "system", "content": sysprompt}]
     for row in history_rows:
         messages.append({"role": row.role.value, "content": row.content})
 
