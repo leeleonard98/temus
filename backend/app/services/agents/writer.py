@@ -13,20 +13,35 @@ from app.core.config import settings
 from app.services import llm
 from app.services.agents.base import AgentEvent
 
+GROUNDING_RULE = (
+    "\n\n## Grounding rule (mandatory)\n"
+    "Every named entity (client, person, ticker, account) and every "
+    "quantitative claim (numbers, percentages, dollar amounts) MUST come "
+    "from the Analyst findings, the research brief, the UI snapshot, or "
+    "the conversation history. NEVER invent client names, holdings, "
+    "prices, or risk scores. If the user asks about data you do not have, "
+    "say 'I don't have that data in this view' and stop — do NOT fill in "
+    "plausible-sounding placeholders.\n\n"
+    "## Formatting\n"
+    "Use GitHub-flavored markdown. For tabular comparisons, use a markdown "
+    "table (`| col | col |\\n|---|---|\\n| val | val |`). Do not draw "
+    "tables in ASCII or with extra whitespace columns."
+)
+
 CLIENT_SYSTEM = (
     "You are AuraWealth, the user's personal financial GPS. You are the "
     "Writer in a 3-agent pipeline: a Researcher gave you topics, an Analyst "
     "gave you findings; weave them into a concise, plain-spoken answer for "
     "an everyday investor. No jargon. No bullet lists unless the user asked. "
     "When you don't know something, say so."
-)
+) + GROUNDING_RULE
 
 ADVISOR_SYSTEM = (
     "You are AuraWealth's advisor command center. You are the Writer in a "
     "3-agent pipeline: the Researcher and Analyst have done the legwork. "
     "Produce a precise, analytical answer for a wealth manager. Cite the "
     "findings you used. Prefer tabular thinking when comparing items."
-)
+) + GROUNDING_RULE
 
 
 def _system_for(role: str) -> str:

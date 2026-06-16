@@ -1,4 +1,6 @@
 import { useEffect, useRef } from "react"
+import ReactMarkdown from "react-markdown"
+import remarkGfm from "remark-gfm"
 
 import { cn } from "@/lib/utils"
 import type { Message, Role } from "@/lib/chat-api"
@@ -50,13 +52,21 @@ export function MessageList({ messages, role, isStreaming }: Props) {
           >
             <div
               className={cn(
-                "max-w-[80%] whitespace-pre-wrap rounded-lg px-3 py-2 text-sm shadow-sm",
+                "max-w-[80%] rounded-lg px-3 py-2 text-sm shadow-sm",
                 m.role === "user"
-                  ? ACCENT_BY_ROLE[role].user
+                  ? cn("whitespace-pre-wrap", ACCENT_BY_ROLE[role].user)
                   : "bg-muted text-foreground",
               )}
             >
-              {m.content || (m.pending ? <TypingDots /> : null)}
+              {m.role === "assistant" ? (
+                m.content ? (
+                  <AssistantMarkdown content={m.content} />
+                ) : m.pending ? (
+                  <TypingDots />
+                ) : null
+              ) : (
+                m.content
+              )}
             </div>
             {m.role === "assistant" && m.trace ? (
               <ReasoningDisclosure trace={m.trace} />
@@ -76,6 +86,63 @@ function TypingDots() {
       <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-foreground/50 [animation-delay:-0.15s]" />
       <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-foreground/50" />
     </span>
+  )
+}
+
+/**
+ * Renders the assistant's streaming markdown. We override a handful of element
+ * components so that GFM tables, code blocks, lists, etc. inherit our spacing
+ * and avoid pulling in @tailwindcss/typography.
+ */
+function AssistantMarkdown({ content }: { content: string }) {
+  return (
+    <div className="space-y-2 leading-relaxed">
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        components={{
+          p: (p) => <p className="whitespace-pre-wrap" {...p} />,
+          table: (p) => (
+            <div className="my-1 overflow-x-auto">
+              <table className="w-full border-collapse text-xs" {...p} />
+            </div>
+          ),
+          thead: (p) => <thead className="bg-background/60" {...p} />,
+          th: (p) => (
+            <th
+              className="border-b border-border px-2 py-1 text-left font-medium"
+              {...p}
+            />
+          ),
+          td: (p) => <td className="border-b border-border/60 px-2 py-1 align-top" {...p} />,
+          ul: (p) => <ul className="ml-5 list-disc space-y-0.5" {...p} />,
+          ol: (p) => <ol className="ml-5 list-decimal space-y-0.5" {...p} />,
+          code: ({ className, children, ...rest }) => {
+            const isBlock = /\bcontent--block\b/.test(className ?? "") || /\n/.test(String(children))
+            return isBlock ? (
+              <pre className="overflow-x-auto rounded bg-background/70 p-2 text-[11px]">
+                <code className={className} {...rest}>
+                  {children}
+                </code>
+              </pre>
+            ) : (
+              <code className="rounded bg-background/70 px-1 py-0.5 text-[11px]" {...rest}>
+                {children}
+              </code>
+            )
+          },
+          a: (p) => (
+            <a
+              {...p}
+              target="_blank"
+              rel="noreferrer"
+              className="underline underline-offset-2"
+            />
+          ),
+        }}
+      >
+        {content}
+      </ReactMarkdown>
+    </div>
   )
 }
 

@@ -20,7 +20,14 @@ SYSTEM_PROMPT = (
     "to read the user's question and produce a SHORT research brief: 2-4 "
     "topics to investigate, plus a one-sentence rationale.\n"
     "Return ONLY a JSON object with keys `topics` (array of strings) and "
-    "`rationale` (string). No prose. No code fences."
+    "`rationale` (string). No prose. No code fences.\n\n"
+    "## Grounding rule (mandatory)\n"
+    "Every named entity (client, person, ticker, account) and every "
+    "quantitative claim (numbers, percentages, dollar amounts) MUST come "
+    "from the conversation history or the UI snapshot below. NEVER invent "
+    "client names, holdings, prices, or risk scores. If the user asks about "
+    "data not present, list a topic like 'request: <what the user wants>' "
+    "and let downstream agents respond 'I don't have that data.'"
 )
 
 
@@ -95,4 +102,87 @@ async def run(
         yield AgentEvent(kind="delta", agent="researcher", content=delta)
 
     output = _parse("".join(chunks), question)
+    yield AgentEvent(kind="complete", agent="researcher", output=output)
+
+
+# ---------- advisor variant ----------
+
+ADVISOR_SYSTEM_PROMPT = (
+    "You are the Researcher in a 3-agent wealth-advice pipeline serving a "
+    "WEALTH MANAGER (advisor). Classify the advisor's question into ONE task "
+    "type and list the topics to investigate.\n"
+    "Allowed task types: client-triage | risk-review | portfolio-review | "
+    "rebalancing | market-summary | compliance | general.\n"
+    "Return ONLY a JSON object with keys `task` (string, one of the above), "
+    "`topics` (array of 2-4 strings), and `rationale` (one sentence). "
+    "No prose. No code fences.\n\n"
+    "## Grounding rule (mandatory)\n"
+    "NEVER invent client names, holdings, or numbers. The Analyst will fetch "
+    "real data via tools — your job is to label what to look up, not to "
+    "answer. If the advisor asks about something outside their book of "
+    "clients, set task='general'."
+)
+
+
+_ADVISOR_TASKS = {
+    "client-triage", "risk-review", "portfolio-review",
+    "rebalancing", "market-summary", "compliance", "general",
+}
+
+
+def _parse_advisor(text: str, question: str) -> dict[str, Any]:
+    """Best-effort JSON parse with deterministic fallback for advisor brief."""
+    stripped = text.strip()
+    if stripped.startswith("```"):
+        stripped = re.sub(r"^```[a-zA-Z]*\n?|```$", "", stripped).strip()
+    try:
+        obj = json.loads(stripped)
+        task_raw = str(obj.get("task", "")).strip().lower()
+        task = task_raw if task_raw in _ADVISOR_TASKS else "general"
+        topics_raw = obj.get("topics")
+        if isinstance(topics_raw, list) and topics_raw:
+            topics = [str(t) for t in topics_raw][:6]
+            rationale = str(obj.get("rationale") or "Identified advisor task and topics.")
+            return {"task": task, "topics": topics, "rationale": rationale}
+    except (ValueError, AttributeError):
+        pass
+    # Heuristic fallback for the offline stub: keyword-based task pick.
+    lower = question.lower()
+    if any(w in lower for w in ("rebalance", "drift", "target allocation")):
+        task = "rebalancing"
+    elif any(w in lower for w in ("risk", "aggressive", "conservative", "exposure")):
+        task = "risk-review"
+    elif any(w in lower for w in ("client", "book", "my clients", "who needs")):
+        task = "client-triage"
+    elif any(w in lower for w in ("market", "rate", "fed", "macro")):
+        task = "market-summary"
+    elif any(w in lower for w in ("compliance", "regulation", "audit")):
+        task = "compliance"
+    else:
+        task = "general"
+    return {
+        "task": task,
+        "topics": _fallback_topics(question),
+        "rationale": "Classified from keywords (offline mode).",
+    }
+
+
+async def run_for_advisor(
+    question: str,
+    history: list[dict],
+) -> AsyncIterator[AgentEvent]:
+    """Advisor Researcher — classifies the request into a task type."""
+    yield AgentEvent(kind="start", agent="researcher")
+
+    messages: list[dict] = [{"role": "system", "content": ADVISOR_SYSTEM_PROMPT}]
+    for row in history:
+        messages.append(row)
+    messages.append({"role": "user", "content": question})
+
+    chunks: list[str] = []
+    async for delta in llm.stream_chat(messages):
+        chunks.append(delta)
+        yield AgentEvent(kind="delta", agent="researcher", content=delta)
+
+    output = _parse_advisor("".join(chunks), question)
     yield AgentEvent(kind="complete", agent="researcher", output=output)

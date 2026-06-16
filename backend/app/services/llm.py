@@ -80,3 +80,46 @@ async def stream_chat(
 from app.services.tracing import wrap_stream_chat as _wrap  # noqa: E402
 
 stream_chat = _wrap(stream_chat)  # type: ignore[assignment]
+
+
+# ---------- non-streaming tool-call helper ----------
+
+
+async def chat_with_tools(
+    messages: list[dict],
+    tools: list[dict],
+    *,
+    model: str | None = None,
+) -> dict:
+    """Single-shot chat completion with tool-call support.
+
+    Returns a dict mirroring the assistant message: {"content": str|None,
+    "tool_calls": [{"id": str, "name": str, "arguments": dict}, ...]}.
+    Falls back to {"content": "[stub-no-tools]", "tool_calls": []} when no
+    API key is configured — tests then patch this function directly.
+    """
+    if not settings.openai_api_key:
+        return {"content": "[stub-no-tools]", "tool_calls": []}
+
+    from openai import AsyncOpenAI
+
+    client = AsyncOpenAI(api_key=settings.openai_api_key)
+    kwargs: dict = {
+        "model": model or settings.openai_model,
+        "messages": messages,
+    }
+    if tools:
+        kwargs["tools"] = tools
+        kwargs["tool_choice"] = "auto"
+    resp = await client.chat.completions.create(**kwargs)
+    msg = resp.choices[0].message
+    out_calls: list[dict] = []
+    for tc in msg.tool_calls or []:
+        try:
+            import json as _json
+
+            args = _json.loads(tc.function.arguments or "{}")
+        except ValueError:
+            args = {}
+        out_calls.append({"id": tc.id, "name": tc.function.name, "arguments": args})
+    return {"content": msg.content, "tool_calls": out_calls}

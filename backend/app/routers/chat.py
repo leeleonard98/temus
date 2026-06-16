@@ -189,6 +189,7 @@ async def chat_stream(
                 history=history,
                 role=role_str,
                 ui_context=payload.ui_context,
+                user_id=str(user.id),
             ):
                 if ev.kind == "start":
                     yield _sse({"type": "agent_start", "agent": ev.agent})
