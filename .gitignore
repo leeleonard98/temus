@@ -30,3 +30,6 @@ Thumbs.db
 # Env
 .env
 .env.local
+
+# Local agent / tooling state
+.claude/
