@@ -61,7 +61,10 @@ async def async_session(
         # but CASCADE clears FK-linked rows.
         await session.execute(
             text(
-                "TRUNCATE TABLE chat_messages, chat_sessions, users "
+                "TRUNCATE TABLE "
+                "chat_messages, chat_sessions, "
+                "positions, accounts, goals, prices, "
+                "users "
                 "RESTART IDENTITY CASCADE"
             )
         )
