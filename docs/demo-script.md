@@ -118,24 +118,26 @@ What did I just tell you my name was?
 **Navigate to `/portfolio`** (header link).
 
 Show:
-- Top KPIs: total market value, day change, allocation donut
-- Account list with positions
-- Goals progress
-- **Risk score widget** ("moderate, score 58, drivers: 65% equity weight, 12% crypto")
+- Live ticker strip (AAPL/MSFT/NVDA/VOO/BND, AC6)
+- Top KPIs: total market value, P/L with live-since-open delta, risk score (AC5) with drivers
+- Asset allocation donut, goals progress bars
+- Accounts table with all positions
 
 > "AC5 — risk is a **deterministic function** of positions × asset-class weights. Pure function, easy to test, not a stale denormalisation."
 
-**Click chat icon (top-right) to open the chat drawer over the dashboard.**
+**Click the floating chat button (bottom-right) to open the chat drawer over the dashboard.**
 
 **Type:**
 
 ```
-What's my YTD return and which holding is dragging it down?
+What's my biggest exposure and which holding is dragging it down?
 ```
 
-> "Here's AC4 — 'ask anything against the data on the UI'. The chat composer ships the dashboard's UI state JSON along with the prompt. The system prompt instructs the model to ground numerical claims in that JSON only — no inventing values."
+> "Here's AC4 — 'ask anything against the data on the UI'. There's a small `UiContextProvider` at the app root; the dashboard publishes its snapshot via `usePublishUiContext({totals, allocation, top_positions})`, and `useChat` reads the live snapshot inside its `send` callback and ships it as `ui_context` in the `/chat` body. The system prompt prepends it as a `## Current UI State` block and tells the model to ground numerical claims in that JSON only — no inventing values."
 
-**Pull up the network tab briefly** to show the `ui_context` payload going up.
+**Pull up the network tab briefly** to show the `ui_context` payload in the POST body.
+
+> "Notice the snapshot updates whenever the portfolio refreshes — the live ticker doesn't push it on every tick (would be noisy), but reload the page or open a new chat and the freshest values are there."
 
 ---
 

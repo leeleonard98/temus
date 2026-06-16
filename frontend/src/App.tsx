@@ -1,10 +1,11 @@
 import { Link, NavLink, Route, BrowserRouter as Router, Routes } from "react-router-dom"
-import { useState } from "react"
 import { ImageIcon, LayoutDashboard, MessageSquare } from "lucide-react"
 
 import { ChatPanel } from "@/features/chat/ChatPanel"
+import { ChatDrawer } from "@/features/chat/ChatDrawer"
 import { PortfolioDashboard } from "@/features/portfolio/PortfolioDashboard"
 import { UploadsPage } from "@/features/uploads/UploadsPage"
+import { UiContextProvider } from "@/lib/ui-context"
 import { cn } from "@/lib/utils"
 
 function NavLinks() {
@@ -31,32 +32,39 @@ function NavLinks() {
 }
 
 function PortfolioRoute() {
-  // The dashboard publishes a UI snapshot via this state; future iterations
-  // can pass it into a chat drawer here to ground AC4 questions.
-  const [, setUiContext] = useState<object | null>(null)
-  return <PortfolioDashboard onUiContextChange={setUiContext} />
+  // The dashboard publishes its snapshot via `usePublishUiContext`; the
+  // floating drawer's ChatPanel reads it through `useUiContext()` — that's
+  // the AC4 bridge, no prop drilling.
+  return (
+    <>
+      <PortfolioDashboard />
+      <ChatDrawer />
+    </>
+  )
 }
 
 export default function App() {
   return (
-    <Router>
-      <div className="min-h-screen bg-background text-foreground">
-        <header className="border-b">
-          <div className="mx-auto flex max-w-6xl items-center justify-between px-6 py-3">
-            <Link to="/" className="text-xl font-semibold tracking-tight">
-              AuraWealth
-            </Link>
-            <NavLinks />
-          </div>
-        </header>
-        <main className="mx-auto max-w-6xl px-6 py-6">
-          <Routes>
-            <Route path="/" element={<ChatPanel />} />
-            <Route path="/portfolio" element={<PortfolioRoute />} />
-            <Route path="/uploads" element={<UploadsPage />} />
-          </Routes>
-        </main>
-      </div>
-    </Router>
+    <UiContextProvider>
+      <Router>
+        <div className="min-h-screen bg-background text-foreground">
+          <header className="border-b">
+            <div className="mx-auto flex max-w-6xl items-center justify-between px-6 py-3">
+              <Link to="/" className="text-xl font-semibold tracking-tight">
+                AuraWealth
+              </Link>
+              <NavLinks />
+            </div>
+          </header>
+          <main className="mx-auto max-w-6xl px-6 py-6">
+            <Routes>
+              <Route path="/" element={<ChatPanel />} />
+              <Route path="/portfolio" element={<PortfolioRoute />} />
+              <Route path="/uploads" element={<UploadsPage />} />
+            </Routes>
+          </main>
+        </div>
+      </Router>
+    </UiContextProvider>
   )
 }

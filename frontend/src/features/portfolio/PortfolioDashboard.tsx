@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react"
+import { useEffect, useMemo, useState } from "react"
 import { ArrowDownRight, ArrowUpRight, ShieldCheck, Target, Wallet } from "lucide-react"
 
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -14,6 +14,7 @@ import {
   type RiskAssessment,
 } from "@/lib/portfolio-api"
 import { upsertUser, type Role } from "@/lib/chat-api"
+import { usePublishUiContext } from "@/lib/ui-context"
 
 import { AllocationChart } from "./AllocationChart"
 import { PriceTicker } from "./PriceTicker"
@@ -96,11 +97,13 @@ export function PortfolioDashboard({ role = "client", onUiContextChange }: Props
     }
   }, [userId])
 
-  // 3. Whenever the portfolio refreshes, hand a UI-state snapshot up to the
-  //    parent so the chat drawer can ground questions like "what's my AAPL %?"
-  useEffect(() => {
-    if (!portfolio || !onUiContextChange) return
-    onUiContextChange({
+  // 3. Whenever the portfolio refreshes, publish a UI-state snapshot so the
+  //    chat panel grounds questions like "what's my AAPL %?" in actual numbers.
+  //    Memoise on the portfolio reference so we don't republish on every render.
+  const uiSnapshot = useMemo(() => {
+    if (!portfolio) return null
+    return {
+      page: "portfolio",
       market_value: Number(portfolio.totals.market_value),
       unrealized_pl: Number(portfolio.totals.unrealized_pl),
       unrealized_pl_pct: portfolio.totals.unrealized_pl_pct,
@@ -113,8 +116,14 @@ export function PortfolioDashboard({ role = "client", onUiContextChange }: Props
         })))
         .sort((a, b) => b.market_value - a.market_value)
         .slice(0, 5),
-    })
-  }, [portfolio, onUiContextChange])
+    }
+  }, [portfolio])
+  usePublishUiContext(uiSnapshot)
+  // Forward to legacy `onUiContextChange` prop too, so existing callers
+  // (App.tsx route shim, tests) keep working.
+  useEffect(() => {
+    if (uiSnapshot && onUiContextChange) onUiContextChange(uiSnapshot)
+  }, [uiSnapshot, onUiContextChange])
 
   if (error) {
     return (

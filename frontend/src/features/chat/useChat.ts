@@ -12,6 +12,7 @@ import {
   type Session,
   type User,
 } from "@/lib/chat-api"
+import { useUiContext } from "@/lib/ui-context"
 
 const STORAGE_KEY = "aurawealth.chat.v1"
 
@@ -137,6 +138,11 @@ export function useChat(): UseChat {
   const [messages, setMessages] = useState<DraftMessage[]>([])
   const [isStreaming, setIsStreaming] = useState(false)
   const [error, setError] = useState<string | undefined>(undefined)
+
+  // AC4 bridge: any page (e.g. portfolio dashboard) can publish a UI snapshot
+  // via the UiContextProvider; we ship it on every send so the model can ground
+  // numerical claims in what's on screen.
+  const { getSnapshot: getUiSnapshot } = useUiContext()
 
   // Track the active bootstrap so role-switching mid-flight doesn't race.
   const bootstrapTokenRef = useRef(0)
@@ -322,7 +328,7 @@ export function useChat(): UseChat {
             )
           },
           undefined,
-          undefined,
+          getUiSnapshot() ?? undefined,
           (event) => {
             trace = applyAgentEvent(trace, event)
             // Mirror running/complete state into the placeholder live so the
@@ -346,7 +352,7 @@ export function useChat(): UseChat {
         setIsStreaming(false)
       }
     },
-    [session, isStreaming],
+    [session, isStreaming, getUiSnapshot],
   )
 
   return {
