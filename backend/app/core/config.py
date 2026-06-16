@@ -24,5 +24,9 @@ class Settings(BaseSettings):
     database_url: str
     environment: str = "development"
 
+    # OpenAI — leave key empty to force the offline stub path (tests, no-network dev).
+    openai_api_key: str = ""
+    openai_model: str = "gpt-4o-mini"
+
 
 settings = Settings()  # module-level singleton

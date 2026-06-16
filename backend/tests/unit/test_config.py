@@ -29,6 +29,36 @@ def test_settings_defaults_environment_to_development() -> None:
         assert s.environment == "development"
 
 
+def test_settings_openai_defaults_when_unset() -> None:
+    """OPENAI_API_KEY defaults to empty string and OPENAI_MODEL to gpt-4o-mini."""
+    env = {k: v for k, v in os.environ.items() if k not in {"OPENAI_API_KEY", "OPENAI_MODEL"}}
+    env["DATABASE_URL"] = "postgresql+asyncpg://u:p@h:5432/d"
+    with patch.dict(os.environ, env, clear=True):
+        from app.core.config import Settings
+
+        s = Settings(_env_file=None)
+        assert s.openai_api_key == ""
+        assert s.openai_model == "gpt-4o-mini"
+
+
+def test_settings_reads_openai_overrides_from_env() -> None:
+    """Both OPENAI_API_KEY and OPENAI_MODEL are read from the environment."""
+    with patch.dict(
+        os.environ,
+        {
+            "DATABASE_URL": "postgresql+asyncpg://u:p@h:5432/d",
+            "OPENAI_API_KEY": "sk-test",
+            "OPENAI_MODEL": "gpt-4o",
+        },
+        clear=False,
+    ):
+        from app.core.config import Settings
+
+        s = Settings(_env_file=None)
+        assert s.openai_api_key == "sk-test"
+        assert s.openai_model == "gpt-4o"
+
+
 def test_settings_missing_database_url_raises_validation_error() -> None:
     """Settings without DATABASE_URL is a configuration error.
 
