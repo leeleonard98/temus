@@ -72,3 +72,11 @@ async def stream_chat(
         content = getattr(delta, "content", None)
         if content:
             yield content
+
+
+# Wrap with Langfuse tracing if keys are configured. No-op identity wrap when
+# they're not (so offline tests stay unchanged). Imported here, after the
+# function is defined, so the module is self-contained.
+from app.services.tracing import wrap_stream_chat as _wrap  # noqa: E402
+
+stream_chat = _wrap(stream_chat)  # type: ignore[assignment]

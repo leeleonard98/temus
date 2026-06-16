@@ -186,7 +186,7 @@ Click "Describe these".
 ## 6. Show the REPL alternate (60 s)
 
 ```bash
-.venv/bin/python -m scripts.repl_chat --email demo-client@aura.test --role client
+cd backend && .venv/bin/python -m scripts.repl_chat --email demo-client@aura.test --role client
 ```
 
 Type:
@@ -206,8 +206,22 @@ Then `/exit`.
 
 Switch to Langfuse browser tab.
 
-> "Every LLM call is here, end-to-end. The 3-agent run shows up as nested spans — Researcher, Analyst, Writer — each with prompt, response, latency, tokens. A18 + A19 + G6 from one integration."
-> "When the Phase-5 planner agent lands, it'll just nest one level deeper — same trace shape, more nodes."
+> "Every LLM call is here, end-to-end. Each `stream_chat` call lands as a `generation` observation with the full prompt, the assembled response, latency, tokens. A18 + A19 + the explainability angle of G6 from one integration."
+> "The wrap is in `app/services/llm.py` — `stream_chat` is replaced at module load with a Langfuse-wrapped async generator. It captures input messages, the resolved model, and the streamed output as it accumulates. When the Phase-5 planner lands, the Researcher / Analyst / Writer calls nest as child spans automatically — same trace shape, more nodes."
+
+**Pre-demo setup (one-time):**
+
+1. Open http://localhost:3000 → sign up → create a project.
+2. Settings → API Keys → copy public + secret keys.
+3. Paste into `backend/.env`:
+   ```
+   LANGFUSE_PUBLIC_KEY=pk-lf-…
+   LANGFUSE_SECRET_KEY=sk-lf-…
+   LANGFUSE_HOST=http://localhost:3000
+   ```
+4. Restart `uvicorn`. Send a chat message in the app. The trace appears in Langfuse within ~5 s.
+
+If keys aren't set, the wrap is a transparent no-op — app behaviour is identical.
 
 ---
 

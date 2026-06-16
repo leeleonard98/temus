@@ -82,20 +82,54 @@ def traced(name: str) -> Callable[[_F], _F]:
 
 
 def wrap_stream_chat(stream_fn: Callable[..., Any]) -> Callable[..., Any]:
-    """Factory the chat agent can opt into to trace `stream_chat` without us
-    touching its module. Returns a wrapped callable; if tracing is disabled
-    it's a no-op identity wrapper.
+    """Wrap an async-generator `stream_chat(messages, model=None)` so each
+    invocation lands as a Langfuse `generation` observation.
+
+    Captures input messages, model, and the assembled output text. Falls back
+    to a no-op identity wrapper when Langfuse isn't configured.
     """
     client = get_client()
     if client is None:
         return stream_fn
 
     @functools.wraps(stream_fn)
-    async def wrapped(*args: Any, **kwargs: Any) -> Any:
+    async def wrapped(messages: list[dict], model: str | None = None, **kwargs: Any):
         ctx_factory = getattr(client, "start_as_current_observation", None)
         if ctx_factory is None:
-            return await stream_fn(*args, **kwargs)
-        with ctx_factory(name="stream_chat", as_type="generation"):
-            return await stream_fn(*args, **kwargs)
+            async for tok in stream_fn(messages, model=model, **kwargs):
+                yield tok
+            return
+
+        # Resolve the model name eagerly so the trace records what *will* be used,
+        # not just what was passed in.
+        from app.core.config import settings as _settings
+
+        observed_model = model or _settings.openai_model
+
+        try:
+            with ctx_factory(
+                name="stream_chat",
+                as_type="generation",
+                input=messages,
+                model=observed_model,
+            ) as obs:
+                collected: list[str] = []
+                try:
+                    async for tok in stream_fn(messages, model=model, **kwargs):
+                        collected.append(tok)
+                        yield tok
+                finally:
+                    # Always try to attach the assembled output, even if the
+                    # consumer aborted mid-stream. Best-effort: if the SDK
+                    # shape doesn't expose .update, swallow.
+                    try:
+                        if obs is not None and hasattr(obs, "update"):
+                            obs.update(output="".join(collected))
+                    except Exception:  # pragma: no cover -- defensive
+                        logger.debug("langfuse obs.update failed", exc_info=True)
+        except Exception:
+            # If the observation context itself errors, never fail the caller.
+            async for tok in stream_fn(messages, model=model, **kwargs):
+                yield tok
 
     return wrapped
