@@ -69,6 +69,8 @@ Have the system-design diagram (`docs/implementation-plan.md` §2 or `docs/archi
 - "**Postgres with pgvector** is doing four jobs: relational data, semantic search (R1), keyword search via FTS (R6), and hybrid (R8). One DB, one backup, one ops surface."
 - "**Redis** is response cache (S2) and task queue (S8)."
 - "**Langfuse** captures every LLM call — A18 + A19 + the explainability angle of G6 from one integration."
+- "**Two pipelines, one orchestrator.** Clients hit a topic-extracting Researcher and a UI-snapshot-grounded Analyst. Advisors hit a *task-classifying* Researcher (`client-triage` / `risk-review` / `rebalancing` / …) and a *tool-calling* Analyst that hits real DB tools — `list_clients`, `get_client_portfolio`, `get_client_risk`. Spec items A1 (specialised agents), A2 (handoff), AC5 (advisor risk against the real book)."
+- "**Langfuse** captures every LLM call — A18 + A19 + the explainability angle of G6 from one integration."
 
 ---
 
@@ -113,7 +115,7 @@ What did I just tell you my name was?
 
 **Click role switcher → "Advisor"**.
 
-> "Same backend, same chat. Different system prompt, different available routes. Histories are completely separate, keyed on user. The localStorage cache only remembers the preferred role — the server is the source of truth."
+> "Same orchestrator, **different pipeline**. The Researcher swaps from a topic extractor to a task classifier — it has to decide: `client-triage` / `risk-review` / `portfolio-review` / `rebalancing` / `market-summary` / `compliance` / `general`. The Analyst swaps from a UI-snapshot reader to a **tool-using agent** with `list_clients`, `get_client_portfolio`, `get_client_risk`, and `rag_search` exposed. Histories are completely separate, keyed on user. The localStorage cache only remembers the preferred role — the server is the source of truth."
 
 **Navigate to `/portfolio`** (header link).
 
@@ -138,6 +140,26 @@ What's my biggest exposure and which holding is dragging it down?
 **Pull up the network tab briefly** to show the `ui_context` payload in the POST body.
 
 > "Notice the snapshot updates whenever the portfolio refreshes — the live ticker doesn't push it on every tick (would be noisy), but reload the page or open a new chat and the freshest values are there."
+
+---
+
+## 3.5. Advisor agent + tools demo (90 s)
+
+**Stay on Advisor. Open a fresh chat.** Type:
+
+```
+Summarise my book by risk level — which clients are most aggressive?
+```
+
+**While it streams, click "Show reasoning"** and narrate:
+
+- "Researcher classified this as `task: risk-review` — that's the advisor task type, not a topic list."
+- "Analyst called `list_clients()` first — see the trace event. That returned the real book from Postgres. Then per-client `get_client_risk(client_id)` calls — one per client."
+- "Writer rendered the markdown table — every name, every score, every label is **straight from a tool call**. Try the same question on a stale build and you'd see invented names like 'Leo' and made-up scores. With the grounding rule + tool-calling Analyst, the answer is reproducible against the DB."
+
+> "Spec lift in this one minute: A1 partial (specialised agents per role — `MarketAnalyst` is the missing 4th expert), A2 (Researcher → Analyst handoff with tool dispatch), AC5 (advisor risk against the real book), G1 (grounding rule baked into all three agent prompts)."
+
+**Optional:** open `services/agents/tools.py` quickly and point at `ADVISOR_TOOL_SCHEMAS` + `TOOL_DISPATCH` — show that tools are normal async Python functions wrapping the same SQL the REST routes use. *"That's also why MCP (A13) is a 1-day add: the tool functions are already there; MCP is just a different transport over the same `TOOL_DISPATCH` map."*
 
 ---
 
@@ -249,7 +271,7 @@ cd ../frontend && npm test -- --run
 
 ## 10. What's next — only if asked (60 s)
 
-> "Phasing: portfolio + AC4–AC6 ✅, agentic-as-default + RAG-min + vision-min ✅. Next is to scale the RAG corpus from 8 docs to 12 to clear the gating, add the planner + 4 expert agents (A1–A3), wire MCP for the Postgres tool calls (A13), add the eval harness (E1–E3, E6), and run the S6 baseline + cache (S2). Each phase is its own bite-sized plan in `docs/superpowers/plans/`."
+> "Phasing: portfolio + AC4–AC6 ✅, agentic-as-default + RAG-min + vision-min ✅, **role-split pipeline + advisor tools (A1 partial, A2, AC5) ✅**. Next is to scale the RAG corpus from 8 docs to 12 to clear the gating, add a 4th named expert (`MarketAnalyst`) + a planner above them (finishing A1, adding A3), wire MCP for the Postgres tool calls (A13 — the underlying tool functions are already in `services/agents/tools.py`), add the eval harness (E1–E3, E6), and run the S6 baseline + cache (S2). Each phase is its own bite-sized plan in `docs/superpowers/plans/`."
 
 ---
 
