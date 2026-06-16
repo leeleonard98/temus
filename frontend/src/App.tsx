@@ -1,9 +1,10 @@
 import { Link, NavLink, Route, BrowserRouter as Router, Routes } from "react-router-dom"
 import { useState } from "react"
-import { LayoutDashboard, MessageSquare } from "lucide-react"
+import { ImageIcon, LayoutDashboard, MessageSquare } from "lucide-react"
 
 import { ChatPanel } from "@/features/chat/ChatPanel"
 import { PortfolioDashboard } from "@/features/portfolio/PortfolioDashboard"
+import { UploadsPage } from "@/features/uploads/UploadsPage"
 import { cn } from "@/lib/utils"
 
 function NavLinks() {
@@ -21,6 +22,9 @@ function NavLinks() {
       </NavLink>
       <NavLink to="/portfolio" className={linkCls}>
         <LayoutDashboard className="h-4 w-4" /> Portfolio
+      </NavLink>
+      <NavLink to="/uploads" className={linkCls}>
+        <ImageIcon className="h-4 w-4" /> Uploads
       </NavLink>
     </nav>
   )
@@ -49,6 +53,7 @@ export default function App() {
           <Routes>
             <Route path="/" element={<ChatPanel />} />
             <Route path="/portfolio" element={<PortfolioRoute />} />
+            <Route path="/uploads" element={<UploadsPage />} />
           </Routes>
         </main>
       </div>
