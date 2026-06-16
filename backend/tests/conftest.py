@@ -64,6 +64,7 @@ async def async_session(
                 "TRUNCATE TABLE "
                 "chat_messages, chat_sessions, "
                 "positions, accounts, goals, prices, "
+                "chunks, documents, media_assets, "
                 "users "
                 "RESTART IDENTITY CASCADE"
             )

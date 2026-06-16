@@ -2,7 +2,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.routers import chat, health, portfolio, prices
+from app.routers import chat, health, portfolio, prices, rag, tools, uploads
 
 app = FastAPI(title="Temus", version="0.1.0")
 
@@ -18,3 +18,6 @@ app.include_router(health.router, prefix="/api/v1")
 app.include_router(chat.router, prefix="/api/v1")
 app.include_router(portfolio.router, prefix="/api/v1")
 app.include_router(prices.router, prefix="/api/v1")
+app.include_router(rag.router, prefix="/api/v1")
+app.include_router(uploads.router, prefix="/api/v1")
+app.include_router(tools.router, prefix="/api/v1")
