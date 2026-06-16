@@ -3,8 +3,6 @@ import { act, renderHook, waitFor } from "@testing-library/react"
 
 import { useChat } from "./useChat"
 
-type FetchArgs = Parameters<typeof fetch>
-
 /** Build a Response whose body is a SSE-style stream of pre-encoded chunks. */
 function sseResponse(chunks: string[]): Response {
   const encoder = new TextEncoder()
