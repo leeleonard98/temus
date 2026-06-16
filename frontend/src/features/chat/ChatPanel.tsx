@@ -1,6 +1,7 @@
 import { Composer } from "./Composer"
 import { MessageList } from "./MessageList"
 import { RoleSwitcher } from "./RoleSwitcher"
+import { SessionPicker } from "./SessionPicker"
 import { useChat } from "./useChat"
 import { cn } from "@/lib/utils"
 import type { Role } from "@/lib/chat-api"
@@ -25,54 +26,67 @@ export function ChatPanel() {
   const theme = ROLE_THEME[chat.role]
 
   return (
-    <div className="flex h-[calc(100vh-4rem)] flex-col overflow-hidden rounded-lg border bg-card shadow-sm">
-      <div className={cn("h-1.5 w-full", theme.strip)} aria-hidden />
-      <header className="flex items-center justify-between gap-4 border-b px-4 py-3">
-        <div className="flex items-center gap-3">
-          <span
-            className={cn(
-              "inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ring-1 ring-inset",
-              theme.badge,
-            )}
-          >
-            {chat.role === "client" ? "Client" : "Advisor"}
-          </span>
-          <div>
-            <h2 className="text-sm font-semibold leading-tight">{theme.title}</h2>
-            <p className="text-xs text-muted-foreground">{theme.subtitle}</p>
+    <div className="flex h-[calc(100vh-4rem)] overflow-hidden rounded-lg border bg-card shadow-sm">
+      <SessionPicker
+        sessions={chat.sessions}
+        currentSessionId={chat.currentSessionId}
+        onSelect={(id) => {
+          void chat.selectSession(id)
+        }}
+        onNew={() => {
+          void chat.newChat()
+        }}
+        disabled={chat.isStreaming || !chat.user}
+      />
+      <div className="flex flex-1 flex-col overflow-hidden">
+        <div className={cn("h-1.5 w-full", theme.strip)} aria-hidden />
+        <header className="flex items-center justify-between gap-4 border-b px-4 py-3">
+          <div className="flex items-center gap-3">
+            <span
+              className={cn(
+                "inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ring-1 ring-inset",
+                theme.badge,
+              )}
+            >
+              {chat.role === "client" ? "Client" : "Advisor"}
+            </span>
+            <div>
+              <h2 className="text-sm font-semibold leading-tight">{theme.title}</h2>
+              <p className="text-xs text-muted-foreground">{theme.subtitle}</p>
+            </div>
           </div>
-        </div>
-        <RoleSwitcher
+          <RoleSwitcher
+            role={chat.role}
+            onChange={chat.setRole}
+            disabled={chat.isStreaming}
+          />
+        </header>
+
+        {chat.error ? (
+          <div
+            role="alert"
+            className="border-b border-destructive/30 bg-destructive/5 px-4 py-2 text-sm text-destructive"
+          >
+            {chat.error}
+          </div>
+        ) : null}
+
+        <MessageList
+          messages={chat.messages}
           role={chat.role}
-          onChange={chat.setRole}
-          disabled={chat.isStreaming}
+          isStreaming={chat.isStreaming}
         />
-      </header>
 
-      {chat.error ? (
-        <div
-          role="alert"
-          className="border-b border-destructive/30 bg-destructive/5 px-4 py-2 text-sm text-destructive"
-        >
-          {chat.error}
-        </div>
-      ) : null}
-
-      <MessageList
-        messages={chat.messages}
-        role={chat.role}
-        isStreaming={chat.isStreaming}
-      />
-
-      <Composer
-        onSend={chat.send}
-        disabled={chat.isStreaming || !chat.session}
-        placeholder={
-          chat.role === "client"
-            ? "Ask about your finances…"
-            : "Ask about clients, portfolios, or markets…"
-        }
-      />
+        <Composer
+          onSend={chat.send}
+          disabled={chat.isStreaming || !chat.session}
+          placeholder={
+            chat.role === "client"
+              ? "Ask about your finances…"
+              : "Ask about clients, portfolios, or markets…"
+          }
+        />
+      </div>
     </div>
   )
 }

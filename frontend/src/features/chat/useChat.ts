@@ -84,6 +84,13 @@ export function useChat(): UseChat {
 
   // Track the active bootstrap so role-switching mid-flight doesn't race.
   const bootstrapTokenRef = useRef(0)
+  // Mirror persisted state in a ref so the bootstrap effect can read the
+  // pinned sessionId for the active role without re-triggering on every
+  // selectSession() call (which mutates persisted.sessionIds).
+  const persistedRef = useRef(persisted)
+  useEffect(() => {
+    persistedRef.current = persisted
+  }, [persisted])
 
   // Bootstrap on mount and whenever the role changes.
   useEffect(() => {
@@ -96,7 +103,7 @@ export function useChat(): UseChat {
       setSession(null)
       setSessions([])
       try {
-        const role = persisted.role
+        const role = persistedRef.current.role
         const seed = SEED_IDENTITIES[role]
         const u = await upsertUser({ ...seed, role })
         if (cancelled || token !== bootstrapTokenRef.current) return
@@ -113,7 +120,7 @@ export function useChat(): UseChat {
         const existing = await listSessions(u.id)
         if (cancelled || token !== bootstrapTokenRef.current) return
 
-        const persistedSessionId = persisted.sessionIds[role]
+        const persistedSessionId = persistedRef.current.sessionIds[role]
         const restored = persistedSessionId
           ? existing.find((s) => s.id === persistedSessionId)
           : undefined
