@@ -28,5 +28,10 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     openai_model: str = "gpt-4o-mini"
 
+    # Langfuse — leave keys empty to disable tracing (tests, offline dev).
+    langfuse_public_key: str = ""
+    langfuse_secret_key: str = ""
+    langfuse_host: str = "http://localhost:3000"
+
 
 settings = Settings()  # module-level singleton
