@@ -1,135 +1,191 @@
 # AuraWealth — Interviewer Demo Script
 
-> **Audience:** Technical interviewer, ~30 minutes total. Allow 10–12 minutes for the live demo, the rest for questions.
-> **Goal:** Show that the system works end-to-end across two personas, that the design choices are deliberate, and that the architecture extends to every spec category.
+> **Audience:** Technical interviewer, ~30 minutes total. ~12 minutes live demo, the rest is Q&A.
+> **Goal:** Show end-to-end working software across two personas, demonstrate the deliberate architecture, and prove every major spec category is wired up — even where features are minimal.
 
 ---
 
-## 0. Pre-flight (do once before the interview starts)
+## 0. Pre-flight (do once before the interview)
 
 ```bash
 # From repo root
 docker compose up -d db redis langfuse
 
-# Apply migrations and seed demo data
+# Migrate + seed
 cd backend
 .venv/bin/alembic upgrade head
 .venv/bin/python -m scripts.seed_demo
+.venv/bin/python -m scripts.ingest_corpus   # populates RAG corpus
 
-# Start the backend
+# Start backend
 .venv/bin/uvicorn app.main:app --reload --port 8000 &
 
-# Start the frontend
+# Start frontend
 cd ../frontend
 npm run dev &
 ```
 
 Open three things in advance:
 
-1. **Browser tab A** — http://localhost:5173 (the app itself, on the Client view)
+1. **Browser tab A** — http://localhost:5173 (the app, on Client view)
 2. **Browser tab B** — http://localhost:3000 (Langfuse, signed in)
-3. **A terminal** — sized big, prompt cleared, `cd backend` already done
+3. **Terminal** — sized large, `cd backend` already done
 
-Have a second monitor or split-screen ready: you'll need the system-design diagram visible while you talk.
+Have the system-design diagram (`docs/implementation-plan.md` §2 or `docs/architecture-walkthrough.md` Layer 2) on a second screen.
 
 ---
 
-## 1. Open with the system-design diagram (90 seconds)
+## 1. Open with the system-design diagram (90 s)
 
-> "Before I run anything I want to show you the shape of the system."
-
-Pull up `docs/implementation-plan.md` §2 (or the diagram below in this doc) and walk through it left to right.
+> "Before I run anything, I want to show you the shape of the system."
 
 ```
 ┌────────────────────────────┐    SSE / REST     ┌──────────────────────────────┐
 │  Vite + React 19 + shadcn  │ ◀──────────────▶ │  FastAPI (async)             │
-│  - Chat panel              │                   │  - Routers                   │
-│  - Role switcher           │                   │  - Agent orchestrator        │
-│  - Upload (img/audio)      │                   │  - LLM service (OpenAI)      │
-│  - Portfolio view          │                   │  - Tool registry / MCP       │
-│  - Trace viewer            │                   │  - Streaming endpoints       │
-└────────────────────────────┘                   └──────┬────────────┬──────────┘
-                                                        │            │
-                                            ┌───────────▼─┐    ┌─────▼──────────┐
-                                            │ Postgres 16 │    │ Redis 7        │
-                                            │  + pgvector │    │  cache + queue │
-                                            └─────────────┘    └────────────────┘
-                                                  ▲
-                                            ┌─────┴────────┐
-                                            │  Langfuse    │  ← every LLM call
-                                            └──────────────┘
+│  - Chat panel              │                   │  - /chat (3-agent pipeline)  │
+│  - Portfolio dashboard     │                   │  - /portfolio /risk /goals   │
+│  - Image upload            │                   │  - /rag/{semantic,kw,hybrid} │
+│  - Sessions sidebar        │                   │  - /uploads/{image,describe} │
+└────────────────────────────┘                   │  - /prices/stream (SSE)      │
+                                                  └──┬──────────────┬───────────┘
+                                                     │              │
+                                          ┌──────────▼─┐    ┌───────▼─────────┐
+                                          │ Postgres + │    │ Redis 7         │
+                                          │  pgvector  │    │ cache + queue   │
+                                          │  - users   │    └─────────────────┘
+                                          │  - chat_*  │
+                                          │  - portfolio
+                                          │  - chunks  │ ← vector + tsvector
+                                          └────────────┘
+                                                ▲
+                                         ┌──────┴──────┐
+                                         │  Langfuse   │ ← every LLM call
+                                         └─────────────┘
 ```
 
-**Talking points (one sentence each):**
+**Talking points:**
 
-- "FastAPI is async end-to-end — that gives me AC1 (event-driven backend) for free, and lets me stream tokens to the browser over SSE without a websocket layer."
-- "Postgres with the pgvector extension is doing four jobs: relational app data, semantic search, keyword search, and FTS. One database, one backup story. I only split off a vector DB if the 100-QPS S11 target forces it."
-- "Redis is the response cache for S2 and the task queue for S8 long-running jobs like ingestion."
-- "Langfuse self-hosted captures every LLM call — so A18, A19, and the explainability angle of G6 all come from the same instrumentation."
+- "**FastAPI async end-to-end** gives me AC1 (event-driven backend) for free, and SSE streaming without a websocket layer."
+- "**Postgres with pgvector** is doing four jobs: relational data, semantic search (R1), keyword search via FTS (R6), and hybrid (R8). One DB, one backup, one ops surface."
+- "**Redis** is response cache (S2) and task queue (S8)."
+- "**Langfuse** captures every LLM call — A18 + A19 + the explainability angle of G6 from one integration."
 
 ---
 
-## 2. Show the live app — Client persona (3 minutes)
+## 2. Show the live app — Client persona (3 min)
 
-> "This is what an end investor sees. The persona is 'Financial GPS'."
+> "This is what an end investor sees. Persona is 'Financial GPS'."
 
-**Click "New chat"** to make sure you start clean.
-
-**Say:** "I'll ask it something simple first to show streaming and persistence."
+**Click "New chat"** in the left rail to start clean.
 
 **Type:**
 
 ```
-Hi, my name is Sam. I just opened a Roth IRA. What's a sensible first thing to invest in?
+Hi, my name is Sam. I just opened a Roth IRA. What should I invest in first?
 ```
 
-— wait for the stream to finish.
+**While it's streaming, narrate:**
 
-**Then type a follow-up:**
+- "Notice the **'Show reasoning'** disclosure above the answer — that's our 3-agent pipeline running. Researcher decomposes the question into sub-topics. Analyst grounds each topic against context (portfolio data, RAG corpus). Writer composes the final user-facing answer. **The user never has to opt in — agentic IS the default chat.**"
+- "That covers spec items C3 (sequential 3-agent workflow) and the front edge of G6 (explainability) with one design."
+
+**After the answer streams in, click "Show reasoning"** to expand:
+
+- Researcher: list of topics ("risk tolerance", "expense ratios", "diversification")
+- Analyst: structured findings with confidence pills
+- Writer: "Wrote final answer"
+
+**Now type a follow-up:**
 
 ```
 What did I just tell you my name was?
 ```
 
-**Talking points while it streams:**
+> "It says 'Sam' — that's AC2. Every turn replays the full ordered message history from Postgres, prepended with a role-aware system prompt. The user message is persisted **before** the LLM call, so a mid-stream disconnect never loses input."
 
-- "Notice the tokens streaming in real time — that's a server-sent-events endpoint emitting `data: {delta: …}` frames. The browser parses them on the fly using the Fetch streaming API; no library."
-- "When the second turn answers 'Sam', that's AC2 in action — every turn replays the full ordered message history from Postgres, prepended with a role-aware system prompt. Persist user message first so a mid-stream disconnect doesn't lose the input."
+**Click "New chat"** to demonstrate the session isolation:
 
-**Click "New chat"** in the left rail.
-
-> "I can have multiple parallel conversations — useful for the demo, and the data model already supports it. Sessions belong to users; messages belong to sessions."
+> "Multiple parallel conversations per user. Sessions belong to users; messages belong to sessions. Per-session memory is full-replay; cross-session memory (A12) plugs in at the planner stage in Phase 5 — schema's already in `docs/architecture-walkthrough.md` §2.4."
 
 ---
 
-## 3. Show the same app — Advisor persona (2 minutes)
+## 3. Switch to Advisor — show portfolio + grounded chat (3 min)
 
-**Click the role switcher → "Advisor"** in the header.
+**Click role switcher → "Advisor"**.
 
-**Talking points while it transitions:**
+> "Same backend, same chat. Different system prompt, different available routes. Histories are completely separate, keyed on user. The localStorage cache only remembers the preferred role — the server is the source of truth."
 
-- "Same backend, same chat surface — but the system prompt is different. The advisor sees a 'Command Center' framing: surfacing clients who need attention, summarising risk."
-- "Histories are completely separate, keyed on user. The localStorage cache only remembers your preferred role — the source of truth is always the server."
+**Navigate to `/portfolio`** (header link).
+
+Show:
+- Top KPIs: total market value, day change, allocation donut
+- Account list with positions
+- Goals progress
+- **Risk score widget** ("moderate, score 58, drivers: 65% equity weight, 12% crypto")
+
+> "AC5 — risk is a **deterministic function** of positions × asset-class weights. Pure function, easy to test, not a stale denormalisation."
+
+**Click chat icon (top-right) to open the chat drawer over the dashboard.**
 
 **Type:**
 
 ```
-Give me a one-paragraph summary of Sam's portfolio risk.
+What's my YTD return and which holding is dragging it down?
 ```
 
-— show it answering with reference to the seeded data.
+> "Here's AC4 — 'ask anything against the data on the UI'. The chat composer ships the dashboard's UI state JSON along with the prompt. The system prompt instructs the model to ground numerical claims in that JSON only — no inventing values."
 
-**Optional** if Phase 2 is in: open `/portfolio` view briefly, point at the risk score widget.
-
-> "AC4 — 'ask anything against the data on the UI' — works because when the chat composer is rendered on a data page, it ships the relevant UI state JSON along with the prompt. The model is told to ground numerical claims in that JSON only."
+**Pull up the network tab briefly** to show the `ui_context` payload going up.
 
 ---
 
-## 4. Show the REPL alternate (90 seconds)
+## 4. RAG corpus — semantic + keyword + hybrid (90 s)
 
-Switch to the terminal.
+**Switch to terminal:**
+
+```bash
+curl -s -X POST http://localhost:8000/api/v1/rag/hybrid \
+  -H 'Content-Type: application/json' \
+  -d '{"query": "should I rebalance after a market drop?"}' | jq
+```
+
+Show 3-4 results with `title`, snippet, and a `score`.
+
+> "**One row per chunk, two indexes**: `vector(1536)` for semantic (R1) and `tsvector` for keyword (R6). Hybrid (R8) is reciprocal-rank fusion across both queries against the same table — no second store. Saves a backup, saves an ops surface."
+
+**Then narrate the limitation:**
+
+> "Time-boxed: corpus is 6 hand-authored markdown docs ≈ 250 chunks, plus 2 multilingual stubs. Spec gates R1/R6 at ≥1000 chunks across >10 docs. Path to scale is in `docs/implementation-plan.md` §4.3 — 12 real PDFs (Vanguard, SEC, BlackRock, MAS, BaFin) via the `pypdf` + `trafilatura` + `text-embedding-3-small` ingestion pipeline. Doc list and embedding strategy already drafted."
+
+---
+
+## 5. Image upload — V1 / V2 / V4 (90 s)
+
+**On the app, navigate to `/uploads`.**
+
+Drag in `assets/fixtures/images/portfolio-snippet.png` (the seeded fixture).
+
+Show: thumbnail appears, id badge.
+
+**Type into the question box:**
 
 ```
+Recreate this table as JSON.
+```
+
+Click "Describe these".
+
+> "V1 single image, V2 multiple per turn — `gpt-4o` accepts the image as a base64 part directly; one call returns structured JSON. SV1 (40-cell table extraction) is the same call with a stricter schema."
+
+**Try uploading an unsupported file** (drag in a `.txt` or `.psd`):
+
+> "V4 — graceful unsupported-type handling. The MIME guard rejects with a 415 and a workaround hint."
+
+---
+
+## 6. Show the REPL alternate (60 s)
+
+```bash
 .venv/bin/python -m scripts.repl_chat --email demo-client@aura.test --role client
 ```
 
@@ -139,81 +195,85 @@ Type:
 > What's the difference between a Roth IRA and a 401(k)?
 ```
 
-…then `/exit`.
+Then `/exit`.
 
-**Talking points:**
-
-- "Same backend service, different client. The REPL talks to the DB directly via the same async session factory and uses the same `stream_chat` service. That's spec item C1 — REPL chat off an LLM."
-- "Both the REPL and the web client fall back to a deterministic stub if `OPENAI_API_KEY` is empty, which is what makes the test suite hermetic. 31 backend tests run offline in under 4 seconds."
+> "Same backend service, different client. The REPL writes directly via `AsyncSessionLocal` and calls the same agent pipeline. C1 — REPL chat off an LLM."
+> "Both clients fall back to a deterministic stub when `OPENAI_API_KEY` is empty. That's why the test suite runs offline — 60+ backend tests, no keys, no flakes, no cost."
 
 ---
 
-## 5. Open Langfuse and click into a trace (90 seconds)
+## 7. Open Langfuse and click into a trace (60 s)
 
-Switch to the Langfuse browser tab.
+Switch to Langfuse browser tab.
 
-**Talking points:**
-
-- "Every LLM call I just made is here, end-to-end. A18 trace and monitoring + A19 in-depth trace per call are both this single integration."
-- "Click into a chat run — you can see the prompt, the response, the latency, the token counts, and how the system prompt assembled the role + history."
-- "When agents come online in Phase 5, the same trace will fan out into nested spans — one per sub-agent — and that becomes G6 explainability and A20 trajectory rendering."
+> "Every LLM call is here, end-to-end. The 3-agent run shows up as nested spans — Researcher, Analyst, Writer — each with prompt, response, latency, tokens. A18 + A19 + G6 from one integration."
+> "When the Phase-5 planner agent lands, it'll just nest one level deeper — same trace shape, more nodes."
 
 ---
 
-## 6. Walk through the data model (90 seconds)
+## 8. Live prices ticker (30 s — optional, only if time)
 
-Open `docs/architecture-walkthrough.md` in the editor.
+Point at the price ticker strip on the dashboard.
 
-**Pick three tables to discuss:**
-
-- `users` + `chat_sessions` + `chat_messages` — explain the cardinality, why I persist user-first, why message order is `created_at ASC`.
-- `documents` + `chunks` — explain that the same row carries both a `vector(1536)` for semantic search and a `tsvector` for keyword. Hybrid search (R8) is RRF fusion of two queries against the same table — no second store needed for the demo.
-- `agent_runs` + `agent_steps` — explain that the parent_step_id self-reference makes A4 dynamic sub-agent spawn trees a single recursive query.
+> "AC6 — simulated streaming prices. Deterministic random walk seeded by `(symbol, ts // 1s)` so two clients see identical numbers — good for screen sharing. Persists every 4th tick to the `prices` table so historical charts have data."
 
 ---
 
-## 7. Show the test suite running (60 seconds)
+## 9. Show the test suite running (60 s)
 
-```
+```bash
 cd backend && OPENAI_API_KEY="" .venv/bin/pytest -q
 cd ../frontend && npm test -- --run
 ```
 
-**Talking points:**
-
-- "Backend tests run with the OpenAI key blanked — that forces the stub LLM, so CI never depends on a remote service or burns budget."
-- "Multi-turn replay (`test_chat_multi_turn_replays_full_history`) and per-user isolation (`test_two_users_have_separate_histories`) are explicit assertions, not incidental — they're the AC2/AC3 acceptance criteria from the spec."
+> "Backend tests with the OpenAI key blanked — forces the stub LLM. CI never depends on a remote service."
+> "Multi-turn replay (`test_chat_multi_turn_replays_full_history`) and per-user isolation (`test_two_users_have_separate_histories`) are explicit assertions, not incidental — they're AC2/AC3 acceptance straight from the spec."
 
 ---
 
-## 8. Discuss what's next (60 seconds — only if asked)
+## 10. What's next — only if asked (60 s)
 
-> "The phasing is: portfolio + AC4/AC5/AC6 next; then the RAG corpus — that's the gating feature for everything in §2.4 of the spec; then multimodal vision/audio with committed fixtures; then the agentic core with four expert agents and a hierarchical orchestrator; then performance baselines and scaling; finally evaluation and governance. Each phase is its own bite-sized plan in `docs/superpowers/plans/`."
-
----
-
-## 9. Closing
-
-> "If you want to see the design rationale in writing — every model field, every endpoint, every why-this-not-that — `docs/architecture-walkthrough.md` covers it. If you want the strategic roadmap, `docs/implementation-plan.md`. If you want the source spec annotated with build/demo cost rankings, `docs/features-spec.md`."
+> "Phasing: portfolio + AC4–AC6 ✅, agentic-as-default + RAG-min + vision-min ✅. Next is to scale the RAG corpus from 8 docs to 12 to clear the gating, add the planner + 4 expert agents (A1–A3), wire MCP for the Postgres tool calls (A13), add the eval harness (E1–E3, E6), and run the S6 baseline + cache (S2). Each phase is its own bite-sized plan in `docs/superpowers/plans/`."
 
 ---
 
-## Q&A — likely questions and one-line answers
+## 11. Closing
+
+> "Three docs to dig deeper:
+> - `docs/architecture-walkthrough.md` — every model field, every endpoint, every why-this-not-that decision
+> - `docs/implementation-plan.md` — strategic roadmap and the master data model
+> - `docs/features-spec.md` — the source brief annotated with build/demo cost"
+
+---
+
+## Q&A — likely questions, one-line answers
+
+**Q: Why is agentic the default rather than a toggle?**
+A: Users shouldn't pick "use the smart mode" — there's no dumb mode. Toggle UX is also impossible to scale: in Phase 5 we add a planner above the three agents and four expert sub-agents below; that can't be a feature flag, it's just chat. The trace is exposed as a "Show reasoning" disclosure on each bubble — explainability without UX cost.
 
 **Q: Why pgvector and not Pinecone/Weaviate/Qdrant?**
-A: One database to operate, one backup. R1 + R6 + R8 fit on the same row (`vector` + `tsvector`). Switch to Qdrant only if S11's 100 QPS target fails on pgvector — decision deferred to after the S6 baseline.
+A: One DB, one backup. R1+R6+R8 fit on the same row. We swap to Qdrant only if S11's 100 QPS target fails on pgvector — decision deferred to after the S6 baseline. The application-side hybrid fuser doesn't change either way.
 
 **Q: How do you handle conversation memory across sessions (A12)?**
-A: Phase 5. New table `user_memories` (id, user_id, kind, content, embedding, source_session_id). On session end a summarizer agent writes facts/preferences as embeddings; on new sessions for the same user, top-k by similarity is prepended to the system prompt. Schema's already in `docs/implementation-plan.md` §3.
+A: Phase 5. New table `user_memories` (id, user_id, kind, content, embedding, source_session_id). Summarizer agent fires post-session; planner retrieves top-k by similarity on session start. Schema's already in the architecture walkthrough.
 
 **Q: Why offline stub LLM in tests?**
-A: Two reasons. Hermetic CI — no key, no flakes, no cost. And it forces the test assertions to focus on plumbing (was the right history loaded? did both messages persist? did SSE frames format correctly?) rather than on semantic answer quality, which is what evals (E1–E7) cover later.
+A: Hermetic CI — no key, no flakes, no cost. Tests assert plumbing (history loaded, SSE framed, ui_context persisted, agent stages emit in order); they don't assert semantic answer quality. Quality is what the eval suites (E1–E7) cover, on demand, against the live model.
 
-**Q: How would you scale this to 100 QPS on vector search (S11)?**
-A: Three levers in order: (1) HNSW index on `chunks.embedding` with `m=16, ef_construction=64`, currently default IVFFlat; (2) read-replica Postgres with pgbouncer in front; (3) move corpus to Qdrant if the read-replica path can't sustain p95 < 500ms. The proof artifact is the locust script in `scripts/bench_vector.py` (Phase 7).
+**Q: How would you scale to 100 QPS on vector search (S11)?**
+A: Three levers: (1) HNSW index instead of IVFFlat; (2) read-replica with pgbouncer; (3) move embeddings to Qdrant if Postgres can't sustain p95 < 500ms. Proof artifact is `scripts/bench_vector.py` (Phase 7).
 
 **Q: How does the advisor approve a rebalance? (G3 / G4)**
-A: Phase 6. `approvals` table — request lands as `status=pending`; advisor UI shows pending list; approve/reject triggers the action workflow; rejection routes to a "why did you reject?" capture and feeds back into the agent's failure-mode dataset (E5 drift). Designed but not built yet.
+A: Phase 6. `approvals` table — pending requests appear in advisor UI; approve triggers the action workflow; reject feeds back into the agent's failure-mode dataset (E5 drift signal).
 
-**Q: Where does the agent identity (G7) come from?**
-A: Each registered agent has a name, a capability list, and a signed identity (HMAC of `name|capabilities|version` with a server secret). The orchestrator only routes to agents whose signature verifies. Phase 8.
+**Q: How are agents identified (G7)?**
+A: Each registered agent has a name + capability list + signed identity (HMAC of `name|caps|version`). Orchestrator only routes to agents whose signature verifies. Phase 8.
+
+**Q: Why hand-authored markdown for the RAG corpus instead of real PDFs?**
+A: Time-box. Real PDFs (Vanguard, SEC, BlackRock, MAS, BaFin — 12 docs, ≥1500 chunks) are listed in `implementation-plan.md` §4.3 with the ingestion pipeline (`pypdf` / `trafilatura` / `text-embedding-3-small`). The endpoints, the schema, and the hybrid-fusion math don't change with corpus size — scaling up is a script run.
+
+**Q: Why is image upload on its own page rather than in chat?**
+A: Phase 1 had to ship a working chat first. Phase 4 will fold the dropzone into the chat composer (drag image into composer → it goes up with the next message). The endpoint and the agent tool that consumes the result are already there; only the UI placement is pending.
+
+**Q: What part of the spec are you most worried about?**
+A: S11 (100 QPS vector DB) and Vo5 (live voice round-trip < 2s). Both are XL-build / fragile-demo. I'd run S11 against pgvector first; if it fails, switch to Qdrant in docker-compose. I'd defer Vo5 unless time permits — a recorded voice round-trip (Vo4) is already +2 points and far easier to demo without latency surprises.
