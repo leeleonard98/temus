@@ -68,9 +68,8 @@ Have the system-design diagram (`docs/implementation-plan.md` §2 or `docs/archi
 - "**FastAPI async end-to-end** gives me AC1 (event-driven backend) for free, and SSE streaming without a websocket layer."
 - "**Postgres with pgvector** is doing four jobs: relational data, semantic search (R1), keyword search via FTS (R6), and hybrid (R8). One DB, one backup, one ops surface."
 - "**Redis** is response cache (S2) and task queue (S8)."
-- "**Langfuse** captures every LLM call — A18 + A19 + the explainability angle of G6 from one integration."
 - "**Two pipelines, one orchestrator.** Clients hit a topic-extracting Researcher and a UI-snapshot-grounded Analyst. Advisors hit a *task-classifying* Researcher (`client-triage` / `risk-review` / `rebalancing` / …) and a *tool-calling* Analyst that hits real DB tools — `list_clients`, `get_client_portfolio`, `get_client_risk`. Spec items A1 (specialised agents), A2 (handoff), AC5 (advisor risk against the real book)."
-- "**Langfuse** captures every LLM call — A18 + A19 + the explainability angle of G6 from one integration."
+- "**Langfuse** captures every LLM call — A18 + A19 + the explainability angle of G6 from one integration. `stream_chat` is wrapped at module load, so the chat router, REPL, and tool-calling all instrument transparently."
 
 ---
 
@@ -88,7 +87,7 @@ Hi, my name is Sam. I just opened a Roth IRA. What should I invest in first?
 
 **While it's streaming, narrate:**
 
-- "Notice the **'Show reasoning'** disclosure above the answer — that's our 3-agent pipeline running. Researcher decomposes the question into sub-topics. Analyst grounds each topic against context (portfolio data, RAG corpus). Writer composes the final user-facing answer. **The user never has to opt in — agentic IS the default chat.**"
+- "Notice the **'Show reasoning'** disclosure under the answer — that's our 3-agent pipeline. Researcher decomposes the question into sub-topics. Analyst grounds each topic against context (UI snapshot for clients, DB tools for advisors). Writer composes the final user-facing answer. **The user never has to opt in — agentic IS the default chat.**"
 - "That covers spec items C3 (sequential 3-agent workflow) and the front edge of G6 (explainability) with one design."
 
 **After the answer streams in, click "Show reasoning"** to expand:

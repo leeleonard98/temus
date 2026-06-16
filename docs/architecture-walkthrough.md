@@ -1,15 +1,251 @@
 # AuraWealth — Architecture Walkthrough
 
-> **Audience:** You. This is the document to read when you want to remember
-> *why* a piece of the system looks the way it does, not what features it has.
-> Scope is everything implemented through Phase 5 of the master plan; later
-> phases are flagged where they introduce new structure.
+> **Audience:** You — and the interviewer reading over your shoulder. The first
+> half is presentation-ready (system design, data flow, agent topology). The
+> second half is the deep self-reader: every decision, every why-this-not-that.
+> Scope is everything implemented through Phase 2.5 (chat foundation +
+> portfolio + AC4 + RAG-min + multimodal-min + role-split agentic pipeline);
+> later phases are flagged where they introduce new structure.
 
 ---
 
-## How to read this doc
+## 0. System design (show this slide)
 
-Three layers, each goes deeper than the last:
+```
+┌─────────────────────────────────────┐  SSE / REST   ┌──────────────────────────────────────┐
+│  Web — Vite + React 19 + shadcn     │ ◀───────────▶ │  FastAPI (async, single process)     │
+│  ┌──────────────┬──────────────┐    │               │  ┌─────────────────────────────────┐ │
+│  │ ChatPanel    │ Portfolio    │    │               │  │ Routers                         │ │
+│  │ (Show        │ Dashboard    │    │               │  │  /chat            (SSE, agentic)│ │
+│  │  reasoning)  │ (live ticker)│    │               │  │  /portfolio /risk /goals        │ │
+│  ├──────────────┼──────────────┤    │               │  │  /prices/stream   (SSE)         │ │
+│  │ Sessions     │ Uploads      │    │               │  │  /rag/{semantic,keyword,hybrid} │ │
+│  │ sidebar      │ + describe   │    │               │  │  /uploads/{image,describe}      │ │
+│  ├──────────────┴──────────────┤    │               │  │  /tools/web_search              │ │
+│  │  ChatDrawer ⇄ UiContextProvider │               │  └────────┬───────────────┬────────┘ │
+│  └─────────────────────────────┘    │               │           │               │          │
+│                                     │               │  ┌────────▼─────────┐ ┌───▼────────┐ │
+│  REPL — scripts.repl_chat ──────────┼───────────────┤  │ Agent pipeline   │ │ Services   │ │
+│  (same orchestrator, no HTTP)       │               │  │ Researcher       │ │ llm        │ │
+└─────────────────────────────────────┘               │  │  → Analyst       │ │ rag        │ │
+                                                       │  │   → Writer       │ │ vision     │ │
+                                                       │  │  (role-split)    │ │ embeddings │ │
+                                                       │  └─┬───┬───┬────────┘ │ web_search │ │
+                                                       │    │   │   │          │ tracing    │ │
+                                                       │    │   │   │          └────────────┘ │
+                                                       └────┼───┼───┼─────────────────────────┘
+                                                            │   │   │
+                                ┌───────────────────────────┘   │   └──────────────┐
+                                ▼                                ▼                  ▼
+                       ┌─────────────────┐               ┌──────────────┐   ┌──────────────────┐
+                       │ Postgres 16 +   │               │ Redis 7      │   │ Langfuse         │
+                       │   pgvector      │               │ (cache,      │   │ (every LLM call) │
+                       │                 │               │  task queue) │   │ A18 + A19 + G6   │
+                       │  users          │               └──────────────┘   └──────────────────┘
+                       │  chat_sessions  │
+                       │  chat_messages  │   ◀── ui_context jsonb on user msgs (AC4)
+                       │  accounts       │
+                       │  positions      │
+                       │  prices         │   ◀── AC6 SSE ticks land here every Nth tick
+                       │  goals          │
+                       │  documents      │
+                       │  chunks         │   ◀── vector(1536) + tsvector
+                       │                 │       cosine + GIN, hybrid via RRF
+                       │  media_assets   │
+                       └─────────────────┘
+```
+
+**Read it left to right:**
+
+1. **Two clients (web + REPL)** talk to one FastAPI service. The web app uses
+   SSE for token streaming (`/chat`) and price ticks (`/prices/stream`); REST
+   for everything else.
+2. **`/chat` is the agentic surface.** It runs a 3-agent sequential pipeline
+   that branches by role (client vs advisor) — see §0.2.
+3. **One Postgres** carries everything: identity, conversations, portfolio,
+   RAG corpus. pgvector + tsvector live on the same `chunks` row, so
+   semantic + keyword + hybrid all hit one table (R1, R6, R8).
+4. **Redis** is response cache (S2) and the queue for long-running jobs (S8).
+5. **Langfuse** wraps every LLM call (A18, A19, G6) without any caller
+   touching it — `stream_chat` self-wraps at module load.
+
+### 0.1 Request lifecycle: a single chat turn
+
+```
+ Browser                Backend                 Agent pipeline           DB / tools
+ ───────                ───────                 ──────────────           ──────────
+
+ type "what's my…"
+ send POST /chat ──▶ chat_stream()
+   {session_id,         persist user msg ───────────────────────────────▶ chat_messages
+    content,            (so disconnects                                    (with ui_context)
+    ui_context}          don't lose input)
+                         │
+                         load full session ──────────────────────────────▶ chat_messages
+                         history (replay)
+                         │
+                         pick CLIENT_SYS or ADVISOR_SYS
+                         │
+                         run_sequential(role)
+                         │
+                         ▼
+                    ┌─ Researcher ──────────────────────┐
+                    │  client: topic extractor          │ stream_chat
+                    │  advisor: task classifier         │   ↳ Langfuse "generation"
+                    │  → {topics|task, rationale}       │   span captured
+                    └─┬─────────────────────────────────┘
+                      │ agent_start / agent_delta* / agent_complete
+                      ▼ frames ────────────────────────▶ Browser stepper updates
+                    ┌─ Analyst ─────────────────────────┐
+                    │  client (UI snap):                │ stream_chat
+                    │   reads {market_value, alloc, …}  │
+                    │  client (no snap) / advisor:      │ chat_with_tools (loop)
+                    │   tool-calls list_clients,        │   ↳ get_client_portfolio
+                    │   get_client_*, rag_search,       │   ↳ get_client_risk
+                    │   web_search, …                   │   ↳ rag_search
+                    │  → {findings[], summary}          │
+                    └─┬─────────────────────────────────┘
+                      │ agent_complete frame
+                      ▼ ───────────────────────────────▶ Browser stepper updates
+                    ┌─ Writer ──────────────────────────┐
+                    │  CLIENT_SYS or ADVISOR_SYS        │ stream_chat
+                    │  + GROUNDING_RULE appended        │   ↳ tokens stream out
+                    │  → final markdown answer          │
+                    └─┬─────────────────────────────────┘
+                      │ delta frames (each token)
+                      ▼ ───────────────────────────────▶ Browser bubble fills in
+                                                          (react-markdown + GFM)
+                         persist assistant msg ──────────────────────────▶ chat_messages
+                         │
+                         emit done frame ─────────────────────────────────▶ Browser
+                         (carries assistant message id)                     finalises
+                                                                            assistant
+                                                                            bubble
+```
+
+Three things to point at on this diagram:
+
+- **User-message-first persistence** — the user's text lands in `chat_messages`
+  *before* the LLM is called. AC2 reload-on-disconnect is a property of the
+  data model, not the UI.
+- **Trace events are siblings of token deltas** — the SSE schema is
+  `{type: "agent_start" | "agent_delta" | "agent_complete" | "delta" | "done", …}`.
+  The frontend reduces both into `useChat`'s state; the "Show reasoning"
+  disclosure renders the trace, the bubble renders the deltas. C3 + the front
+  edge of G6 fall out of one design.
+- **Tracing is invisible to callers** — the chat router doesn't import
+  Langfuse. `stream_chat` is wrapped at module load. The advisor analyst's
+  `chat_with_tools` calls are also instrumented automatically once we wrap
+  that function the same way (one-line change, deferred).
+
+### 0.2 Agent topology
+
+```
+                                  ┌─────────────────────────┐
+                                  │     /api/v1/chat         │
+                                  │  (single SSE endpoint)   │
+                                  └────────────┬─────────────┘
+                                               │
+                              role = "client"  │  role = "advisor"
+                                               │
+                  ┌────────────────────────────┴────────────────────────────┐
+                  ▼                                                         ▼
+  ┌────────────────────────────────┐                  ┌────────────────────────────────────┐
+  │ Researcher (client)            │                  │ Researcher (advisor)               │
+  │  topic extractor               │                  │  task classifier                   │
+  │  → {topics[], rationale}       │                  │  task ∈ {client-triage,            │
+  │                                │                  │          risk-review,              │
+  │                                │                  │          portfolio-review,         │
+  │                                │                  │          rebalancing,              │
+  │                                │                  │          market-summary,           │
+  │                                │                  │          compliance, general}      │
+  │                                │                  │  → {task, topics[], rationale}     │
+  └──────────────┬─────────────────┘                  └─────────────────┬──────────────────┘
+                 ▼                                                      ▼
+  ┌────────────────────────────────┐                  ┌────────────────────────────────────┐
+  │ Analyst (client)               │                  │ Analyst (advisor)                  │
+  │  if ui_context published       │                  │  tool-call loop with               │
+  │     → ground in snapshot       │                  │   • list_clients                   │
+  │  else if user_id known         │                  │   • get_client_portfolio(id)       │
+  │     → tool-call                │                  │   • get_client_risk(id)            │
+  │       get_user_portfolio       │                  │   • rag_search(query)              │
+  │       get_user_risk            │                  │   • web_search(query)   (A9)       │
+  │  + rag_search optional         │                  │  → {findings[], summary}           │
+  │  → {findings[], summary}       │                  │  (every claim cites a tool result) │
+  └──────────────┬─────────────────┘                  └─────────────────┬──────────────────┘
+                 ▼                                                      ▼
+  ┌─────────────────────────────────────────────────────────────────────────────────────────┐
+  │ Writer (shared, role-aware system prompt + GROUNDING_RULE)                              │
+  │   - CLIENT_SYS: plain-spoken Financial GPS tone                                         │
+  │   - ADVISOR_SYS: precise, tabular, citation-friendly                                    │
+  │   - GROUNDING_RULE forbids invented names, holdings, prices, scores;                    │
+  │     "I don't have that data in this view" instead of plausible filler                   │
+  │   - Streams markdown tokens; frontend renders with react-markdown + remark-gfm          │
+  └─────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Why role-split here, not at the router.** The router stays a single
+endpoint with a role flag. Both pipelines share the SSE schema, the trace
+event shape, and the persistence path (one assistant `chat_messages` row,
+same `agent_runs` story when Phase 5 wires them). Splitting *inside* the
+sequential orchestrator means the demo only has to show one URL — the
+"different pipeline per role" explanation is a property of the agents, not
+the API.
+
+**What's still missing.** Phase 5 adds a Planner agent above this and a
+fourth named expert (`MarketAnalyst`). Both are additive; the SSE schema
+doesn't change, the router doesn't change. The disclosure UI just renders
+more nodes in the stepper.
+
+### 0.3 The SSE wire format (one place to memorise)
+
+```json
+data: {"type": "agent_start",    "agent": "researcher"}\n\n
+data: {"type": "agent_delta",    "agent": "researcher", "content": "tok"}\n\n
+data: {"type": "agent_complete", "agent": "researcher", "output": {…structured…}}\n\n
+data: {"type": "agent_start",    "agent": "analyst"}\n\n
+…
+data: {"type": "agent_complete", "agent": "analyst", "output": {…findings, summary…}}\n\n
+data: {"type": "agent_start",    "agent": "writer"}\n\n
+data: {"type": "delta",          "content": "tok"}\n\n      ← user-facing answer tokens
+data: {"type": "delta",          "content": "tok"}\n\n
+data: {"type": "agent_complete", "agent": "writer"}\n\n
+data: {"type": "done",           "message_id": "uuid…"}\n\n
+```
+
+- **`delta` (no agent)** = the final answer. The bubble fills in.
+- **`agent_*`** = trace events. Reasoning disclosure updates.
+- **`done`** = persisted assistant `chat_messages.id` so the UI can swap its
+  optimistic placeholder for the real id.
+
+If you remember nothing else: **one stream, two consumers — the bubble and
+the stepper.**
+
+### 0.4 Five things that surprise people
+
+1. **Tests run offline.** `OPENAI_API_KEY=""` activates a deterministic stub
+   inside `app/services/llm.py`. Same module, same caller path, hermetic
+   CI. 91 backend tests in 16 seconds, no flakes, no cost.
+2. **No real auth.** The role switcher in localStorage *is* the auth model.
+   Distinct seeded emails per role on the backend; per-user histories. A
+   real auth system is one cookie + one `Depends(current_user)` away.
+3. **`stream_chat` is replaced at import.** The Langfuse wrapping isn't a
+   decorator-per-call; it's an assignment at module load. Every caller in
+   the codebase gets traced, no further wiring. (Tracing's a transparent
+   no-op when keys are absent.)
+4. **`chunks` carries both indexes.** `vector(1536)` for cosine + `tsvector`
+   for FTS, on the same row. R1, R6, R8 don't need a second store; hybrid
+   is application-side RRF over two queries against one table.
+5. **The advisor analyst is a tool-using agent already.** `list_clients`,
+   `get_client_portfolio`, `get_client_risk`, `rag_search`, `web_search`
+   live in `services/agents/tools.py`. MCP (A13) is the same dispatch map
+   exposed over a different transport — not a new system.
+
+---
+
+## How to read the rest
+
+Three layers of depth, choose your altitude:
 
 1. **Mental models** — the few ideas that, if you hold them, the rest of the
    system explains itself.
@@ -379,9 +615,73 @@ a side effect.
 
 ---
 
-### 2.4 Agentic core (Phase 5)
+### 2.4 Agentic core
 
-#### Tables
+#### Today — role-split sequential pipeline (what's running)
+
+Three agents, in series. The orchestrator branches at the Researcher and
+Analyst steps based on the user's role; the Writer is shared.
+
+```
+                                  ┌─────────────────────────┐
+                                  │  POST /api/v1/chat       │
+                                  │  run_sequential(role)    │
+                                  └────────────┬─────────────┘
+                                               │
+                  role = "client"               │              role = "advisor"
+                  ┌────────────────────────────┴────────────────────────────┐
+                  ▼                                                         ▼
+  Researcher.run(question, history,                      Researcher.run_for_advisor(question,
+                 ui_context)                                                history)
+   topic extractor → {topics[],                           task classifier → {task,
+                       rationale}                            topics[], rationale}
+                  │                                                         │
+                  ▼                                                         ▼
+  Analyst.run_for_client(question, research,            Analyst.run_for_advisor(question,
+                          ui_context, *, user_id)                                research)
+   if ui_context: ground in snapshot                    chat_with_tools loop:
+   elif user_id : tool-call get_user_*                    list_clients, get_client_portfolio,
+   + rag_search optional                                  get_client_risk, rag_search,
+   → {findings[], summary}                                web_search
+                                                         → {findings[], summary}
+                  │                                                         │
+                  └────────────────────────────┬────────────────────────────┘
+                                               ▼
+                           Writer.run(question, research, analysis,
+                                      history, role, ui_context)
+                            CLIENT_SYS or ADVISOR_SYS + GROUNDING_RULE
+                            streams markdown tokens
+```
+
+**Code map** (`backend/app/services/agents/`):
+
+- `base.py` — `AgentEvent` dataclass (`kind`, `agent`, `content`, `output`).
+- `researcher.py` — `run` + `run_for_advisor`, both async generators.
+- `analyst.py` — `run_for_client` + `run_for_advisor`, latter uses
+  `llm.chat_with_tools` in a loop until the model stops asking for tools.
+- `writer.py` — single `run`; system prompt picked by role; `GROUNDING_RULE`
+  appended.
+- `sequential.py` — `run_sequential(role, …)` chains the three.
+- `tools.py` — `rag_search`, `web_search`, `list_clients`,
+  `get_client_portfolio`, `get_client_risk`, `get_user_*`, plus the OpenAI
+  function-tool schema list `ADVISOR_TOOL_SCHEMAS` and a `TOOL_DISPATCH`
+  map.
+
+**Why no tables yet for `agent_runs` / `agent_steps`.** Today the trace
+lives in (a) the SSE event stream the frontend reduces into per-message
+`trace` state, and (b) Langfuse generations once keys are configured.
+Persistent agent-run rows become useful when Phase 5 adds a planner above
+the three (so we can ask "which planner step spawned this researcher
+call?") and when A4 dynamic-sub-agent spawning needs a recursive query.
+Both are cleaner additions than retrofits.
+
+#### Tomorrow — Phase 5 (planner + 4 experts + persisted trace)
+
+The full Phase 5 picture is below. The current pipeline becomes the inner
+loop; the Planner sits above it; the four named experts replace the
+Researcher/Analyst/Writer specialisation with a richer set.
+
+#### Future tables
 
 ```
 agent_runs
@@ -417,7 +717,7 @@ A20 (show agent trajectory) and G6 (explainability) both render from the
 same `agent_steps` rows — once they're in the DB and in Langfuse, the
 artefacts are essentially free.
 
-#### Orchestrator topology
+#### Future orchestrator topology
 
 ```
               ┌────────────────────┐
@@ -434,7 +734,10 @@ artefacts are essentially free.
 
 Hand-off (A2) is implemented via tool-call routing: each expert exposes a
 `call_<expert>(...)` tool to the planner, the planner picks one (or several
-in parallel), the orchestrator dispatches.
+in parallel), the orchestrator dispatches. (Note: the *current* advisor
+analyst already uses tool-call routing for DB access — Phase 5 promotes
+that pattern from "tools the analyst calls" to "experts the planner
+delegates to.")
 
 A12 (cross-session memory) plugs in here: the planner agent's first step is
 to retrieve the top-k `user_memories` for the active user (cosine over the
@@ -445,20 +748,38 @@ fires post-session to write new memories.
 
 ### 2.5 LLM service
 
-`app/services/llm.py` exposes one async function:
+`app/services/llm.py` exposes two async functions:
 
 ```python
 async def stream_chat(
     messages: list[dict],
     model: str | None = None,
 ) -> AsyncIterator[str]:
+    """Streaming token generator. Used by Researcher / Analyst (client) /
+    Writer. Self-wraps with Langfuse at module load."""
+
+async def chat_with_tools(
+    messages: list[dict],
+    tools: list[dict],
+    *,
+    model: str | None = None,
+) -> dict:
+    """Single-shot completion with OpenAI tool-call support. Returns
+    {"content": str|None, "tool_calls": [{id, name, arguments}, ...]}.
+    Used by the advisor Analyst's tool-call loop. Stub fallback returns
+    {"content": "[stub-no-tools]", "tool_calls": []}."""
 ```
 
-The full implementation is short on purpose. Two responsibilities:
+The full implementations are short on purpose. Three responsibilities total:
 
-1. **Routing.** No key → stub generator. Key set → `openai.AsyncOpenAI`.
-2. **Token extraction.** Walks `chunk.choices[0].delta.content` for non-None
-   strings. The caller never sees raw chunks.
+1. **Routing.** No key → deterministic stub. Key set → `openai.AsyncOpenAI`.
+2. **Token / tool-call extraction.** `stream_chat` walks
+   `chunk.choices[0].delta.content`. `chat_with_tools` parses the
+   single-shot `message.tool_calls`, JSON-decoding `arguments`. The caller
+   never sees raw OpenAI types.
+3. **Tracing.** `stream_chat` is replaced at module load with a
+   Langfuse-wrapped async generator. (`chat_with_tools` doesn't have the
+   wrap yet — one-line addition when we want it.)
 
 Things this service deliberately does not do:
 
@@ -466,8 +787,8 @@ Things this service deliberately does not do:
 - Token counting — Langfuse handles it post hoc.
 - Caching — that's S2's job, lives in Redis with a hash key on the
   `messages` list.
-- Tool/function calling — that's the agent layer's job; the LLM service
-  stays text-only and the agents own the tool-call loop.
+- Tool *dispatch* — `chat_with_tools` only returns the call request; the
+  agent layer owns the loop and executes tools via `TOOL_DISPATCH`.
 
 This boundary is what makes "swap models" and "wrap with tracing" trivial:
 you decorate or replace one function.
