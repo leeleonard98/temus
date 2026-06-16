@@ -12,6 +12,13 @@ dependencies = [
     "pydantic>=2.9",
     "pydantic-settings>=2.6",
     "python-multipart>=0.0.12",
+    # LLM + agentic
+    "openai>=1.54",
+    "langfuse>=2.50,<3",
+    # RAG / vector
+    "pgvector>=0.3",
+    # Cache + queue
+    "redis>=5.2",
 ]
 
 [project.optional-dependencies]

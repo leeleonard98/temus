@@ -1,6 +1,8 @@
 services:
   db:
-    image: postgres:16-alpine
+    # pgvector/pgvector:pg16 = Postgres 16 + the `vector` extension preinstalled.
+    # Drop-in replacement for postgres:16-alpine; same data dir, same client tools.
+    image: pgvector/pgvector:pg16
     container_name: temus-db
     restart: unless-stopped
     environment:
@@ -17,5 +19,61 @@ services:
       timeout: 5s
       retries: 5
 
+  redis:
+    # Used for: response cache (S2), background-job queue (S8), rate limiting.
+    image: redis:7-alpine
+    container_name: temus-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - temus_redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # Langfuse self-hosted — full LLM trace UI on http://localhost:3000.
+  # Two services: its own Postgres (isolated from temus app DB) + the web app.
+  langfuse-db:
+    image: postgres:16-alpine
+    container_name: temus-langfuse-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: langfuse
+      POSTGRES_USER: langfuse
+      POSTGRES_PASSWORD: langfuse
+    volumes:
+      - temus_langfuse_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U langfuse -d langfuse"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  langfuse:
+    # Pinned to last v2.x — single-container, no Clickhouse/MinIO required.
+    # v3.x requires a multi-service stack (Clickhouse + MinIO + Redis), too heavy for this demo.
+    image: langfuse/langfuse:2.93.7
+    container_name: temus-langfuse
+    restart: unless-stopped
+    depends_on:
+      langfuse-db:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+    environment:
+      DATABASE_URL: postgresql://langfuse:langfuse@langfuse-db:5432/langfuse
+      NEXTAUTH_URL: http://localhost:3000
+      # Dev-only secrets. Rotate for any non-local deploy.
+      NEXTAUTH_SECRET: dev-nextauth-secret-change-me
+      SALT: dev-salt-change-me
+      ENCRYPTION_KEY: d263e692fe6850e1bf9f90a88b4b47feabf5d4dbcca75387fcedcbaa82df9556
+      TELEMETRY_ENABLED: "false"
+      LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES: "false"
+
 volumes:
   temus_pgdata:
+  temus_redisdata:
+  temus_langfuse_pgdata:
