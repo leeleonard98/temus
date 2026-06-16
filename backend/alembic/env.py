@@ -14,7 +14,10 @@ from app.db.base import Base
 from app.db import models  # noqa: F401
 
 config = context.config
-config.set_main_option("sqlalchemy.url", settings.database_url)
+# Honor an explicit sqlalchemy.url set by the caller (e.g. tests via
+# AlembicConfig.set_main_option). Fall back to app settings otherwise.
+if not config.get_main_option("sqlalchemy.url"):
+    config.set_main_option("sqlalchemy.url", settings.database_url)
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)

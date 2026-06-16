@@ -6,6 +6,7 @@ import pytest_asyncio
 from alembic import command
 from alembic.config import Config as AlembicConfig
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from testcontainers.postgres import PostgresContainer
 
@@ -17,8 +18,7 @@ from app.main import app
 def postgres_container() -> Iterator[PostgresContainer]:
     """Start a Postgres 16 container for the whole test session.
 
-    Applies all alembic migrations once at startup. With zero migrations
-    (day one), there's nothing to apply and we silently move on.
+    Applies all alembic migrations once at startup.
     """
     with PostgresContainer("postgres:16-alpine") as pg:
         sync_url = pg.get_connection_url()
@@ -33,11 +33,7 @@ def postgres_container() -> Iterator[PostgresContainer]:
         )
         alembic_cfg = AlembicConfig("alembic.ini")
         alembic_cfg.set_main_option("sqlalchemy.url", sync_psycopg_url)
-        try:
-            command.upgrade(alembic_cfg, "head")
-        except Exception:
-            # No revisions yet — expected on day one.
-            pass
+        command.upgrade(alembic_cfg, "head")
 
         pg.async_url = async_url  # type: ignore[attr-defined]
         yield pg
@@ -47,7 +43,12 @@ def postgres_container() -> Iterator[PostgresContainer]:
 async def async_session(
     postgres_container: PostgresContainer,
 ) -> AsyncIterator[AsyncSession]:
-    """Provide a clean async session per test (rolls back at teardown)."""
+    """Provide a clean async session per test.
+
+    Truncates app tables before each test so commits made by FastAPI route
+    handlers don't leak between tests. (Per-test rollback alone is not enough
+    because routes call `session.commit()` themselves.)
+    """
     engine = create_async_engine(
         postgres_container.async_url,  # type: ignore[attr-defined]
         future=True,
@@ -56,8 +57,16 @@ async def async_session(
         engine, class_=AsyncSession, expire_on_commit=False
     )
     async with session_maker() as session:
+        # Wipe between tests. RESTART IDENTITY isn't strictly needed (uuid pk)
+        # but CASCADE clears FK-linked rows.
+        await session.execute(
+            text(
+                "TRUNCATE TABLE chat_messages, chat_sessions, users "
+                "RESTART IDENTITY CASCADE"
+            )
+        )
+        await session.commit()
         yield session
-        await session.rollback()
     await engine.dispose()
 
 
