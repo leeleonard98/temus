@@ -1,0 +1,74 @@
+"""Thin async wrapper over OpenAI chat-completions streaming.
+
+If `settings.openai_api_key` is empty, `stream_chat` yields a deterministic
+stub response token-by-token. This keeps the REPL and the test suite
+operable without network or credentials.
+"""
+from __future__ import annotations
+
+import asyncio
+import logging
+from collections.abc import AsyncIterator
+
+from app.core.config import settings
+
+logger = logging.getLogger(__name__)
+_warned_stub = False
+
+
+def _last_user_message(messages: list[dict]) -> str:
+    for msg in reversed(messages):
+        if msg.get("role") == "user":
+            return str(msg.get("content", ""))
+    return ""
+
+
+async def _stub_stream(messages: list[dict]) -> AsyncIterator[str]:
+    """Deterministic offline stand-in for the LLM."""
+    global _warned_stub
+    if not _warned_stub:
+        logger.warning(
+            "OPENAI_API_KEY is empty — using offline stub LLM. "
+            "Set OPENAI_API_KEY to use a real model."
+        )
+        _warned_stub = True
+
+    text = f"[stub] echo: {_last_user_message(messages)}".rstrip()
+    # Yield a few chars at a time to mimic streaming. Tiny sleep so consumers
+    # can interleave (e.g. SSE flush, REPL print).
+    chunk_size = 4
+    for i in range(0, len(text), chunk_size):
+        yield text[i : i + chunk_size]
+        await asyncio.sleep(0)
+
+
+async def stream_chat(
+    messages: list[dict], model: str | None = None
+) -> AsyncIterator[str]:
+    """Stream content deltas from the configured chat model.
+
+    Falls back to a deterministic stub when no API key is configured.
+    """
+    if not settings.openai_api_key:
+        async for chunk in _stub_stream(messages):
+            yield chunk
+        return
+
+    # Live path — imported lazily so missing creds don't crash module import
+    # in offline test runs.
+    from openai import AsyncOpenAI
+
+    client = AsyncOpenAI(api_key=settings.openai_api_key)
+    response = await client.chat.completions.create(
+        model=model or settings.openai_model,
+        messages=messages,
+        stream=True,
+    )
+    async for event in response:
+        # Each event has .choices[0].delta.content (may be None on role frames).
+        if not event.choices:
+            continue
+        delta = event.choices[0].delta
+        content = getattr(delta, "content", None)
+        if content:
+            yield content
